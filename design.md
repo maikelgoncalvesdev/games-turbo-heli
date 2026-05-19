@@ -128,10 +128,14 @@ A **bomba não mata o chefe**, mas tira 25% da vida máxima dele.
 - **Dificuldade escalonada** por fase: inimigos ganham +vida, +velocidade e
   tiros mais rápidos; spawn mais frequente (prédios não escalam vida).
 - **Chefes variados** por fase (ciclo de 3, HP crescente).
-- **Upgrades**: tiro frontal `F` (até 3; **nível 3 = mísseis frontais**, com
-  dano maior e explosão), lateral `S` (até 2), bombas `B`
-  (máx. 3), vida `1UP`, e **TURBO** (cadência, a cada 40 abates, até nível 2).
+- **Upgrades**: tiro frontal `F` (até **4**; níveis 1→3 escalam o leque,
+  **nível 4 acumula mísseis frontais** com dano maior e explosão),
+  lateral `S` (até **3**), bombas `B` (máx. **3** normal / **5** fácil),
+  vida `1UP` (máx. **5** normal / **10** fácil), e **TURBO** (cadência, a
+  cada 40 abates, até nível 2).
   Ao ser **atingido**, perde um nível na ordem `F → S → TURBO`.
+- **Drop inteligente**: um power-up **não cai** se o jogador já está no
+  limite daquele atributo (não desperdiça `B/F/S/1UP`).
 
 ---
 
@@ -172,17 +176,31 @@ A **bomba não mata o chefe**, mas tira 25% da vida máxima dele.
 
 ---
 
-## 12. Pipeline WebGL (pós-processamento)
+## 12. Pipeline WebGL (iluminação diferida + pós-processamento)
 
-Sem libs (WebGL puro, mantém "arquivo único"). O jogo continua sendo
-desenhado **inteiramente em Canvas 2D** num canvas offscreen (`#cv`); a cada
-frame esse canvas vira textura e passa por shaders, com saída no canvas
-visível (`#gl`):
+Sem libs (WebGL puro, mantém "arquivo único"). Tudo continua **gerado por
+código, sem assets**.
 
-1. **Bright-pass**: extrai as áreas luminosas (`smoothstep` na luminância).
-2. **Blur gaussiano separável** (H/V, meia resolução, 2 passadas) → bloom.
-3. **Composição final**: cena + bloom aditivo, **tela plana** (sem
-   curvatura/máscara/scanlines), apenas com vinheta leve.
+**Bake de sprites:** heli, tanque (casco+torre) e árvore são desenhados
+**1× em alta resolução** num canvas offscreen, gerando **albedo** + **normal
+map**. O normal é derivado de um *heightmap* (relevo em cinza) via **Sobel** —
+basta pintar volumes claros/escuros e a luz por pixel sai sozinha.
 
-Sem WebGL disponível, faz **fallback** automático para o canvas 2D puro
-(zero quebra). A lógica de jogo e toda a arte vetorial não foram tocadas.
+**G-buffer 2D:** a cada frame o jogo desenha o **albedo** no `#cv` e as
+**normais** num segundo canvas `cvN` (padrão "plano" = `#8080ff`; só as
+entidades HD escrevem relevo).
+
+**Passes WebGL** (saída no `#gl`):
+
+1. **Iluminação**: sol direcional + especular + **luzes dinâmicas**
+   (flash do tiro, explosões) usando as normais → cena iluminada.
+2. **Bright-pass** (por saturação) + **blur gaussiano separável** → bloom.
+3. **Composição final**: cena iluminada + bloom + vinheta leve (tela plana).
+
+Sem WebGL disponível, faz **fallback** automático para o canvas 2D (zero
+quebra). A lógica de jogo não foi tocada.
+
+> **Status:** em propagação — heli, tanque, floresta e **trem de guerra
+> blindado** (locomotiva-cunha + vagões + canhão de topo giratório) já
+> usam o pipeline HD+luz. Demais inimigos/chefes/biomas seguem na arte
+> antiga (normal plano) e serão migrados na sequência.

@@ -78,6 +78,10 @@
 <script>
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
 const W = cv.width, H = cv.height;
+// buffer de normais (G-buffer 2D): #8080ff = normal "para cima" (plano)
+const cvN = document.createElement('canvas');
+cvN.width = W; cvN.height = H;
+const nx = cvN.getContext('2d');
 const $ = id => document.getElementById(id);
 
 let keys = {};
@@ -530,15 +534,28 @@ const PUPS = {
   B:   { col:'#ffcc00', label:'B' },   // bomba +1
   '1UP':{ col:'#3cff7a', label:'1UP' },// vida extra
 };
+// limites máximos (vida/bomba dependem do modo)
+const PWR_MAX = 4, SIDE_MAX = 3;
+function bombMax() { return gameMode === 'easy' ? 5 : 3; }
+function lifeMax() { return gameMode === 'easy' ? 10 : 5; }
+// um power-up só é útil (e só deve dropar) se ainda não estiver no limite
+function canUse(kind) {
+  if (kind === 'F')   return player.pwr  < PWR_MAX;
+  if (kind === 'S')   return player.side < SIDE_MAX;
+  if (kind === 'B')   return bombs        < bombMax();
+  if (kind === '1UP') return lives        < lifeMax();
+  return true;
+}
 function dropPower(x, y, kind) {
+  if (!canUse(kind)) return;            // no limite: não dropa
   powerups.push({ x, y, w:24, h:24, kind, ...PUPS[kind] });
 }
 function applyPower(kind) {
   const p = player;
-  if (kind === 'F')      p.pwr  = Math.min(3, p.pwr + 1);
-  else if (kind === 'S') p.side = Math.min(3, p.side + 1);
-  else if (kind === 'B') bombs = Math.min(gameMode === 'easy' ? 5 : 3, bombs + 1);
-  else if (kind === '1UP') lives++;
+  if (kind === 'F')      p.pwr  = Math.min(PWR_MAX, p.pwr + 1);
+  else if (kind === 'S') p.side = Math.min(SIDE_MAX, p.side + 1);
+  else if (kind === 'B') bombs = Math.min(bombMax(), bombs + 1);
+  else if (kind === '1UP') lives = Math.min(lifeMax(), lives + 1);
   if (kind === '1UP') SFX.life(); else SFX.power();
   explode(player.x, player.y, PUPS[kind].col, 14);
   updateHud();
@@ -723,15 +740,14 @@ function update() {
   if (keys.Space && p.cd === 0) {
     const sb = (dx, vx) => bullets.push(
       { x: p.x + dx, y: p.y - 18, w:4, h:12, vx: vx||0 });
-    // tiro frontal por nível
-    if (p.pwr >= 3) {
-      // último estágio: mísseis frontais
+    // tiro frontal por nível (1→2→3 escala; 4 = mantém tudo + mísseis)
+    sb(-8, 0); sb(8, 0);
+    if (p.pwr >= 2) sb(0, 0);
+    if (p.pwr >= 3) { sb(-14, -1.6); sb(14, 1.6); }
+    if (p.pwr >= 4) {
       const mis = dx => bullets.push(
         { x: p.x + dx, y: p.y - 18, w:8, h:16, vx:0, vy:-9, mis:1, dmg:4 });
       mis(-9); mis(9);
-    } else {
-      sb(-8, 0); sb(8, 0);
-      if (p.pwr >= 2) sb(0, 0);
     }
     // tiro lateral
     if (p.side >= 1) {
@@ -1122,23 +1138,337 @@ function drawBridgesOver() {   // chamado após desenhar os barcos
   gRoads.forEach(roadBridge);
 }
 
+/* ===================================================================
+   BAKE DE SPRITES: arte HD assada 1x em albedo + normal map.
+   O normal map é derivado de um "heightmap" (mapa de relevo em cinza)
+   via Sobel — assim basta pintar volumes claros/escuros e a luz por
+   pixel sai sozinha no shader WebGL. Tudo gerado por código, sem assets.
+   =================================================================== */
+function _cv(w,h){ const c=document.createElement('canvas');
+  c.width=w; c.height=h; return c; }
+
+function heightToNormal(hcv, strength){
+  const w=hcv.width, h=hcv.height;
+  const hc=hcv.getContext('2d');
+  const s=hc.getImageData(0,0,w,h).data;
+  const out=hc.createImageData(w,h), o=out.data;
+  const Hh=(x,y)=>{ x=x<0?0:x>w-1?w-1:x; y=y<0?0:y>h-1?h-1:y;
+    const i=(y*w+x)*4; return s[i+3] ? s[i]/255 : 0; };
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const i=(y*w+x)*4, a=s[i+3];
+    if(!a){ o[i]=128;o[i+1]=128;o[i+2]=255;o[i+3]=0; continue; }
+    let nx=(Hh(x-1,y)-Hh(x+1,y))*strength;
+    let ny=(Hh(x,y-1)-Hh(x,y+1))*strength;
+    let nz=1, L=Math.hypot(nx,ny,nz)||1;
+    o[i]  =(nx/L*.5+.5)*255;
+    o[i+1]=(ny/L*.5+.5)*255;
+    o[i+2]=(nz/L*.5+.5)*255;
+    o[i+3]=a;
+  }
+  const n=_cv(w,h); n.getContext('2d').putImageData(out,0,0); return n;
+}
+// albedoFn/heightFn recebem um ctx já centrado (0,0 = meio do sprite)
+function bakeSprite(w,h, albedoFn, heightFn){
+  const a=_cv(w,h), ac=a.getContext('2d');
+  const hh=_cv(w,h), hc=hh.getContext('2d');
+  ac.save(); ac.translate(w/2,h/2); albedoFn(ac); ac.restore();
+  hc.save(); hc.translate(w/2,h/2); heightFn(hc); hc.restore();
+  return { a, n: heightToNormal(hh, 2.4), w, h };
+}
+// pincel de relevo: bolha radial clara (volume arredondado)
+function hBlob(g,x,y,rx,ry,hi,lo){
+  const grd=g.createRadialGradient(x,y,0,x,y,Math.max(rx,ry));
+  grd.addColorStop(0,`rgb(${hi},${hi},${hi})`);
+  grd.addColorStop(1,`rgb(${lo},${lo},${lo})`);
+  g.fillStyle=grd;
+  g.save(); g.translate(x,y); g.scale(rx,ry);
+  g.beginPath(); g.arc(0,0,1,0,7); g.fill(); g.restore();
+}
+
+let SPR = null;
+function buildSprites(){
+  // ---- HELICÓPTERO DO PLAYER (48x76) ----
+  const heli = bakeSprite(48,76, a=>{
+    // lança de cauda
+    let g=a.createLinearGradient(-5,0,5,0);
+    g.addColorStop(0,'#3a6b2d'); g.addColorStop(.5,'#5a9145');
+    g.addColorStop(1,'#2f5524'); a.fillStyle=g;
+    a.beginPath(); a.moveTo(-4,6); a.lineTo(4,6);
+    a.lineTo(2.5,30); a.lineTo(-2.5,30); a.closePath(); a.fill();
+    a.fillStyle='#27461c'; a.fillRect(-10,24,20,5);
+    // fuselagem com volume (gradiente diagonal: luz vinda de cima-esq)
+    g=a.createLinearGradient(-12,-20,12,16);
+    g.addColorStop(0,'#7fc063'); g.addColorStop(.45,'#4f8a3a');
+    g.addColorStop(1,'#2d5a22'); a.fillStyle=g;
+    a.beginPath(); a.ellipse(0,-2,12,20,0,0,7); a.fill();
+    // nariz
+    g=a.createRadialGradient(-3,-15,1,0,-12,11);
+    g.addColorStop(0,'#9ad27e'); g.addColorStop(1,'#3f7a2e');
+    a.fillStyle=g; a.beginPath(); a.ellipse(0,-12,9,10,0,0,7); a.fill();
+    // faixa militar + reflexo
+    a.fillStyle='#33611f'; a.fillRect(-12,-4,24,5);
+    a.fillStyle='rgba(255,255,255,.18)'; a.fillRect(-12,-4,24,1);
+    // cockpit
+    g=a.createLinearGradient(-5,-19,5,-7);
+    g.addColorStop(0,'#eaffff'); g.addColorStop(.5,'#9fd9f5');
+    g.addColorStop(1,'#3c7fa0'); a.fillStyle=g;
+    a.beginPath(); a.ellipse(0,-13,6.5,7.5,0,0,7); a.fill();
+    a.fillStyle='rgba(255,255,255,.65)';
+    a.beginPath(); a.ellipse(-2.5,-15,2,3,-.5,0,7); a.fill();
+    // patins
+    a.strokeStyle='#202020'; a.lineWidth=2.4; a.lineCap='round';
+    a.beginPath(); a.moveTo(-14,-8); a.lineTo(-14,10);
+    a.moveTo(14,-8); a.lineTo(14,10); a.stroke();
+    a.lineWidth=1.6; a.beginPath();
+    a.moveTo(-14,1); a.lineTo(-7,1); a.moveTo(14,1); a.lineTo(7,1); a.stroke();
+  }, h=>{
+    // relevo: boom baixo, fuselagem em domo, nariz/cockpit salientes
+    h.fillStyle='#3a3a3a';
+    h.beginPath(); h.moveTo(-4,6); h.lineTo(4,6);
+    h.lineTo(2.5,30); h.lineTo(-2.5,30); h.closePath(); h.fill();
+    hBlob(h,0,-2,13,21,210,70);          // domo da fuselagem
+    hBlob(h,0,-12,10,11,235,110);        // nariz mais alto
+    hBlob(h,0,-13,7,8,255,150);          // bolha do cockpit
+    h.fillStyle='#3a3a3a'; h.fillRect(-14,-8,3,18);
+    h.fillRect(11,-8,3,18);              // patins (baixos)
+  });
+
+  // ---- CASCO + ESTEIRAS DO TANQUE (44x44) ----
+  const tank = bakeSprite(44,44, a=>{
+    // esteiras
+    [-1,1].forEach(s=>{
+      let g=a.createLinearGradient(s*17-4,0,s*17+4,0);
+      g.addColorStop(0,'#1c1c1c'); g.addColorStop(.5,'#3a3a3a');
+      g.addColorStop(1,'#141414'); a.fillStyle=g;
+      a.fillRect(s*17-4,-16,8,32);
+      a.fillStyle='#0d0d0d';
+      for(let i=-16;i<16;i+=5) a.fillRect(s*17-4,i,8,2.4);
+    });
+    // casco com chanfro iluminado
+    let g=a.createLinearGradient(-13,-13,13,13);
+    g.addColorStop(0,'#b7a063'); g.addColorStop(.5,'#7d6b3f');
+    g.addColorStop(1,'#4f4324'); a.fillStyle=g;
+    a.fillRect(-12,-15,24,30);
+    a.fillStyle='rgba(255,245,200,.30)'; a.fillRect(-12,-15,24,4);
+    a.fillStyle='rgba(0,0,0,.35)'; a.fillRect(-12,11,24,4);
+    // grade do motor + reflexos
+    a.strokeStyle='rgba(0,0,0,.4)'; a.lineWidth=1;
+    for(let i=-8;i<10;i+=3){ a.beginPath();
+      a.moveTo(-9,i); a.lineTo(9,i); a.stroke(); }
+  }, h=>{
+    h.fillStyle='#2a2a2a';
+    h.fillRect(-21,-16,8,32); h.fillRect(13,-16,8,32);   // esteiras baixas
+    hBlob(h,0,0,13,16,225,110);                          // casco abaulado
+  });
+
+  // ---- TORRE + CANHÃO (gira mirando o player) (52x18, pivô no centro-esq) ----
+  const turret = bakeSprite(52,24, a=>{
+    let g=a.createLinearGradient(0,-3,0,3);
+    g.addColorStop(0,'#5a4d2c'); g.addColorStop(1,'#2e2614');
+    a.fillStyle=g; a.fillRect(2,-3.5,26,7);              // cano
+    g=a.createRadialGradient(-2,-2,1,0,0,10);
+    g.addColorStop(0,'#7a6a3e'); g.addColorStop(1,'#3c3320');
+    a.fillStyle=g; a.beginPath(); a.arc(0,0,9,0,7); a.fill();
+    a.fillStyle='#2a2416'; a.beginPath(); a.arc(0,0,4,0,7); a.fill();
+  }, h=>{
+    h.fillStyle='#888'; h.fillRect(2,-3.5,26,7);
+    hBlob(h,0,0,9,9,240,120);
+  });
+
+  // ---- ÁRVORE (copa volumétrica) ref s=24 -> canvas 96x96 ----
+  const tree = bakeSprite(96,96, a=>{
+    const S=24, lob=[[-.5,.1,.7],[.5,.05,.7],[0,-.5,.8],[0,.35,.85]];
+    a.fillStyle='#16441f';
+    lob.forEach(([dx,dy,r])=>{ a.beginPath();
+      a.arc(dx*S,dy*S,r*S,0,7); a.fill(); });
+    lob.forEach(([dx,dy,r])=>{
+      const g=a.createRadialGradient(dx*S-r*S*.4,dy*S-r*S*.5,1,
+        dx*S,dy*S,r*S);
+      g.addColorStop(0,'#5fae54'); g.addColorStop(.6,'#2f7a38');
+      g.addColorStop(1,'rgba(20,60,25,0)');
+      a.fillStyle=g; a.beginPath(); a.arc(dx*S,dy*S,r*S,0,7); a.fill();
+    });
+  }, h=>{
+    const S=24, lob=[[-.5,.1,.7],[.5,.05,.7],[0,-.5,.8],[0,.35,.85]];
+    lob.forEach(([dx,dy,r])=>hBlob(h,dx*S,dy*S,r*S,r*S,235,40));
+  });
+
+  // ---- TREM DE GUERRA: vagão blindado (52x40, corpo ~46x30) ----
+  const trainCar = bakeSprite(52,40, a=>{
+    let g=a.createLinearGradient(0,-15,0,15);
+    g.addColorStop(0,'#5a626e'); g.addColorStop(.45,'#39404a');
+    g.addColorStop(1,'#1f242b'); a.fillStyle=g;
+    a.fillRect(-23,-13,46,26);                       // casamata blindada
+    a.fillStyle='rgba(255,255,255,.16)'; a.fillRect(-23,-13,46,3);
+    a.fillStyle='rgba(0,0,0,.40)'; a.fillRect(-23,10,46,3);
+    a.fillStyle='#2b313a';                           // chanfros laterais
+    a.beginPath(); a.moveTo(-23,-13); a.lineTo(-20,-13);
+    a.lineTo(-23,-7); a.closePath(); a.fill();
+    a.beginPath(); a.moveTo(23,-13); a.lineTo(20,-13);
+    a.lineTo(23,-7); a.closePath(); a.fill();
+    a.fillStyle='#11151a';                           // seteira blindada
+    a.fillRect(-15,-3,30,5);
+    a.fillStyle='rgba(120,150,180,.25)'; a.fillRect(-15,-3,30,1);
+    a.fillStyle='#0c0e12';                           // rebites
+    for(let rx=-19;rx<=19;rx+=6){ a.beginPath();
+      a.arc(rx,-10,1.3,0,7); a.fill();
+      a.beginPath(); a.arc(rx,9,1.3,0,7); a.fill(); }
+    a.fillStyle='#0a0b0e';                           // bogies/rodas
+    a.fillRect(-22,12,44,5);
+    [-14,-4,4,14].forEach(wx=>{ a.beginPath();
+      a.arc(wx,16,4,0,7); a.fillStyle='#15171c'; a.fill();
+      a.fillStyle='#3a3f47'; a.beginPath();
+      a.arc(wx,16,1.6,0,7); a.fill(); });
+  }, h=>{
+    h.fillStyle='#3a3a3a'; h.fillRect(-23,12,46,6);  // rodas baixas
+    hBlob(h,0,-1,24,15,225,90);                      // casamata abaulada
+    h.fillStyle='rgba(255,255,255,.0)';
+  });
+
+  // ---- LOCOMOTIVA BLINDADA (60x44, nariz em cunha à direita) ----
+  const trainLoco = bakeSprite(60,44, a=>{
+    let g=a.createLinearGradient(0,-16,0,16);
+    g.addColorStop(0,'#6b5350'); g.addColorStop(.45,'#47312f');
+    g.addColorStop(1,'#241413'); a.fillStyle=g;
+    a.beginPath();                                   // casco + cunha frontal
+    a.moveTo(-27,-14); a.lineTo(18,-14); a.lineTo(28,0);
+    a.lineTo(18,14); a.lineTo(-27,14); a.closePath(); a.fill();
+    a.fillStyle='rgba(255,255,255,.16)';
+    a.fillRect(-27,-14,45,3);
+    a.fillStyle='rgba(0,0,0,.42)'; a.fillRect(-27,11,46,3);
+    a.fillStyle='#7a3a34';                            // cabine elevada
+    a.fillRect(-24,-12,16,24);
+    a.fillStyle='#11151a';
+    a.fillRect(-21,-5,9,7);                           // visor blindado
+    a.fillStyle='#0c0e12';                            // rebites do nariz
+    for(let ry=-10;ry<=10;ry+=5){ a.beginPath();
+      a.arc(15,ry,1.4,0,7); a.fill(); }
+    a.fillStyle='#161616';                            // chaminé curta
+    a.fillRect(2,-20,8,8);
+    a.fillStyle='#0a0b0e'; a.fillRect(-26,13,52,5);   // bogies
+    [-18,-6,8,18].forEach(wx=>{ a.beginPath();
+      a.arc(wx,17,4.5,0,7); a.fillStyle='#15171c'; a.fill();
+      a.fillStyle='#4a3f3a'; a.beginPath();
+      a.arc(wx,17,1.8,0,7); a.fill(); });
+  }, h=>{
+    h.fillStyle='#3a3a3a'; h.fillRect(-26,13,52,6);
+    hBlob(h,-4,-1,27,16,220,80);                      // corpo
+    hBlob(h,-16,0,9,13,245,150);                      // cabine mais alta
+  });
+
+  // ---- CANHÃO DE TOPO DO TREM (74x30, pivô no centro-esq) ----
+  const trainGun = bakeSprite(74,34, a=>{
+    let g=a.createLinearGradient(0,-5,0,5);
+    g.addColorStop(0,'#454d3a'); g.addColorStop(1,'#181c12');
+    a.fillStyle=g; a.fillRect(8,-5,34,10);            // cano grosso
+    a.fillStyle='#0e1009'; a.fillRect(38,-6,7,12);    // freio de boca
+    a.fillRect(31,-6,3,12);
+    g=a.createRadialGradient(-3,-3,1,0,0,15);
+    g.addColorStop(0,'#7c8460'); g.addColorStop(.6,'#4a5238');
+    g.addColorStop(1,'#252a1b'); a.fillStyle=g;
+    a.beginPath(); a.arc(0,0,14,0,7); a.fill();       // torre blindada
+    a.fillStyle='#2f3422';
+    a.fillRect(-13,-13,12,26);                        // contrapeso traseiro
+    a.fillStyle='rgba(255,255,255,.15)';
+    a.beginPath(); a.arc(-3,-4,6,0,7); a.fill();      // brilho da cúpula
+    a.fillStyle='#11140c'; a.beginPath();
+    a.arc(0,0,4,0,7); a.fill();                       // escotilha
+  }, h=>{
+    h.fillStyle='#8a8a8a'; h.fillRect(8,-5,37,10);
+    h.fillStyle='#5a5a5a'; h.fillRect(-13,-13,12,26);
+    hBlob(h,0,0,14,14,250,110);                       // cúpula
+  });
+
+  // ---- CAÇA STEALTH estilo F-22 (44x44, nariz em +y/baixo) ----
+  const jet = bakeSprite(44,44, a=>{
+    const mir=(pts,fn)=>{ fn(pts); fn(pts.map(([x,y])=>[-x,y])); };
+    const poly=p=>{ a.beginPath(); a.moveTo(p[0][0],p[0][1]);
+      for(let i=1;i<p.length;i++) a.lineTo(p[i][0],p[i][1]);
+      a.closePath(); a.fill(); };
+    // estabilizadores traseiros (mais escuros, por baixo)
+    a.fillStyle='#444b56';
+    mir([[5,-13],[14,-19],[16,-17],[6,-11]],poly);
+    // ASAS trapezoidais grandes e varridas
+    let g=a.createLinearGradient(0,6,0,-14);
+    g.addColorStop(0,'#828c99'); g.addColorStop(1,'#4e555f');
+    a.fillStyle=g;
+    mir([[5,5],[21,-8],[20,-12],[6,-13]],poly);
+    // FUSELAGEM com chines (losango stealth), nariz +y
+    g=a.createLinearGradient(-7,0,7,0);
+    g.addColorStop(0,'#5c636d'); g.addColorStop(.5,'#9aa3af');
+    g.addColorStop(1,'#5c636d'); a.fillStyle=g;
+    poly([[0,19],[4,12],[6.5,3],[6.5,-12],[4,-18],
+          [-4,-18],[-6.5,-12],[-6.5,3],[-4,12]]);
+    // facetas stealth escuras (quebram a forma)
+    a.fillStyle='rgba(40,45,52,.55)';
+    mir([[6.5,3],[6.5,-12],[3,-12],[3,2]],poly);     // flanco
+    a.fillStyle='rgba(255,255,255,.10)';
+    poly([[0,18],[2.4,11],[2.4,-10],[-2.4,-10],[-2.4,11]]); // spine claro
+    // caudas verticais CANTADAS em V (claras, no topo)
+    a.fillStyle='#aeb6c0';
+    mir([[3,-3],[9,-15],[11,-13],[5,-2]],poly);
+    // tomadas de ar
+    a.fillStyle='#2b2f37';
+    a.fillRect(-6,-2,2.4,9); a.fillRect(3.6,-2,2.4,9);
+    // bicos dos motores (traseira, serrilhados)
+    a.fillStyle='#1b1e24';
+    a.fillRect(-4.6,-19,3.4,4); a.fillRect(1.2,-19,3.4,4);
+    a.fillStyle='#3a2a18';
+    a.fillRect(-4.6,-15.5,3.4,1.5); a.fillRect(1.2,-15.5,3.4,1.5);
+    // canopy dourado (assinatura do F-22)
+    g=a.createLinearGradient(0,13,0,3);
+    g.addColorStop(0,'#ffe9a8'); g.addColorStop(.5,'#caa24a');
+    g.addColorStop(1,'#6e521f'); a.fillStyle=g;
+    a.beginPath(); a.ellipse(0,8.5,2.8,5,0,0,7); a.fill();
+    a.fillStyle='rgba(255,255,255,.55)';
+    a.beginPath(); a.ellipse(-.8,10,1,1.8,0,0,7); a.fill();
+  }, h=>{
+    const poly=p=>{ h.beginPath(); h.moveTo(p[0][0],p[0][1]);
+      for(let i=1;i<p.length;i++) h.lineTo(p[i][0],p[i][1]);
+      h.closePath(); h.fill(); };
+    h.fillStyle='#4a4a4a';                            // asas finas/baixas
+    poly([[5,5],[21,-8],[20,-12],[6,-13]]);
+    poly([[-5,5],[-21,-8],[-20,-12],[-6,-13]]);
+    h.fillStyle='#6e6e6e';                            // estabilizadores
+    poly([[5,-13],[14,-19],[16,-17],[6,-11]]);
+    poly([[-5,-13],[-14,-19],[-16,-17],[-6,-11]]);
+    hBlob(h,0,-2,6.5,17,235,70);                      // espinha da fuselagem
+    hBlob(h,7,-9,3,7,150,40); hBlob(h,-7,-9,3,7,150,40); // caudas V
+    hBlob(h,0,8.5,3,5,255,150);                        // bolha do canopy
+  });
+
+  SPR = { heli, tank, turret, tree,
+          trainCar, trainLoco, trainGun, jet };
+}
+// blit albedo no cv e o normal correspondente no cvN (mesmo transform)
+function stamp(spr, x, y, rot, scl){
+  scl = scl || 1;
+  const dw=spr.w*scl, dh=spr.h*scl;
+  ctx.save(); ctx.translate(x,y); if(rot) ctx.rotate(rot);
+  ctx.drawImage(spr.a, -dw/2, -dh/2, dw, dh); ctx.restore();
+  nx.save(); nx.translate(x,y); if(rot) nx.rotate(rot);
+  nx.drawImage(spr.n, -dw/2, -dh/2, dw, dh); nx.restore();
+}
+// fontes de luz dinâmicas → shader (canvas px, y p/ baixo) máx 16
+function collectLights(){
+  const L=[];
+  // luz do bocal: ESTÁVEL enquanto atira (não pisca com o cooldown)
+  if(state==='play' && keys && keys.Space && player.takeoff<=0)
+    L.push([player.x, player.y-20, 80, 1.0,0.85,0.45, 1.0]);
+  for(let k=0;k<parts.length && L.length<15;k+=7){
+    const p=parts[k];
+    if(p.life>24) L.push([p.x,p.y,70, 1.0,0.55,0.22, 1.0]);
+  }
+  return L;
+}
+
 function drawTree(x, y, s) {
   // sombra projetada
   ctx.fillStyle = 'rgba(0,0,0,.22)';
   ctx.beginPath(); ctx.ellipse(x + s*0.5, y + s*0.6, s*0.95, s*0.55, 0, 0, 7);
   ctx.fill();
-  // copa em camadas
-  const lobes = [[-.5,.1,.7],[.5,.05,.7],[0,-.5,.8],[0,.35,.85]];
-  ctx.fillStyle = '#1c5226';
-  lobes.forEach(([dx,dy,r]) => {
-    ctx.beginPath(); ctx.arc(x+dx*s, y+dy*s, r*s, 0, 7); ctx.fill();
-  });
-  ctx.fillStyle = '#2f7a38';
-  lobes.forEach(([dx,dy,r]) => {
-    ctx.beginPath(); ctx.arc(x+dx*s-1, y+dy*s-1.5, r*s*0.7, 0, 7); ctx.fill();
-  });
-  ctx.fillStyle = 'rgba(150,210,120,.5)';
-  ctx.beginPath(); ctx.arc(x-2, y-3, s*0.32, 0, 7); ctx.fill();
+  // copa volumétrica: sprite HD assado (albedo + normal p/ luz por pixel)
+  if (SPR) stamp(SPR.tree, x, y, 0, s/24);
 }
 
 function riverPath(pad = 0) {
@@ -1642,45 +1972,14 @@ function drawHeli(x, y, blink, sc) {
     ctx.restore();
   }
 
-  // lança de cauda (fina, afilando para trás)
-  ctx.fillStyle = '#3c6e2f';
-  ctx.beginPath();
-  ctx.moveTo(-4, 6); ctx.lineTo(4, 6);
-  ctx.lineTo(2.5, 30); ctx.lineTo(-2.5, 30);
-  ctx.closePath(); ctx.fill();
-  // estabilizador horizontal da cauda
-  ctx.fillStyle = '#2f5524';
-  ctx.fillRect(-9, 24, 18, 5);
-
-  // fuselagem (oval alongada)
-  ctx.fillStyle = '#4f8a3a';
-  ctx.beginPath();
-  ctx.ellipse(0, -2, 11, 19, 0, 0, 7);
-  ctx.fill();
-  // nariz mais claro
-  ctx.fillStyle = '#5fa247';
-  ctx.beginPath();
-  ctx.ellipse(0, -12, 9, 9, 0, 0, 7);
-  ctx.fill();
-  // faixa militar
-  ctx.fillStyle = '#33611f';
-  ctx.fillRect(-11, -4, 22, 5);
-
-  // cockpit envidraçado
-  ctx.fillStyle = '#bfe9ff';
-  ctx.beginPath();
-  ctx.ellipse(0, -13, 6, 7, 0, 0, 7);
-  ctx.fill();
-  ctx.fillStyle = 'rgba(255,255,255,.5)';
-  ctx.fillRect(-4, -16, 3, 6);
-
-  // patins de pouso
-  ctx.strokeStyle = '#2a2a2a';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(-14, -8); ctx.lineTo(-14, 10);
-  ctx.moveTo(14, -8);  ctx.lineTo(14, 10);
-  ctx.stroke();
+  // corpo HD assado: albedo no contexto local, normal no cvN (absoluto)
+  if (SPR) {
+    ctx.drawImage(SPR.heli.a, -SPR.heli.w/2, -SPR.heli.h/2);
+    nx.save(); nx.translate(x, y);
+    if (sc && sc !== 1) nx.scale(sc, sc);
+    nx.drawImage(SPR.heli.n, -SPR.heli.w/2, -SPR.heli.h/2);
+    nx.restore();
+  }
 
   // rotor de cauda
   const ta = frame * 1.4;
@@ -1726,87 +2025,66 @@ function drawEnemy(e) {
   ctx.fillStyle = e.col;
   const w = e.w, h = e.h;
   if (e.t === 'train') {
+    // TREM DE GUERRA BLINDADO: locomotiva-cunha + vagões + canhão de topo
     const dir = e.vx >= 0 ? 1 : -1;          // sentido de marcha
-    const carW = 44, gap = 2;
-    // vagões (a partir da traseira até a locomotiva na frente)
-    for (let i = 0; i < e.cars; i++) {
-      const cxp = -w/2 + 8 + i*(carW+gap) + carW/2;
-      const loco = (dir > 0) ? (i === e.cars-1) : (i === 0);
-      const cg = ctx.createLinearGradient(0,-h/2,0,h/2);
-      cg.addColorStop(0, loco ? '#7a2a26' : '#3f4654');
-      cg.addColorStop(1, loco ? '#4a1714' : '#272c36');
-      ctx.fillStyle = cg;
-      ctx.fillRect(cxp-carW/2, -h/2, carW, h);
-      ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.lineWidth = 2;
-      ctx.strokeRect(cxp-carW/2, -h/2, carW, h);
-      // teto e janelas
-      ctx.fillStyle = loco ? '#9a3a30' : '#5b6678';
-      ctx.fillRect(cxp-carW/2+3, -h/2+3, carW-6, 6);
-      ctx.fillStyle = '#cfe6f5';
-      for (let k=-1;k<2;k++) ctx.fillRect(cxp+k*12-4, -3, 8, 7);
-      // rodas
-      ctx.fillStyle = '#15171c';
-      [-1,1].forEach(s=>{ ctx.beginPath();
-        ctx.arc(cxp+s*12, h/2, 5, 0, 7); ctx.fill(); });
-      // engate
-      if (i < e.cars-1) { ctx.fillStyle='#222';
-        ctx.fillRect(cxp+carW/2-1, -2, gap+2, 4); }
-      if (loco) { // chaminé da locomotiva
-        ctx.fillStyle = '#1c1c1c';
-        ctx.beginPath(); ctx.arc(cxp+dir*10, 0, 5, 0, 7); ctx.fill();
-        ctx.fillStyle = `rgba(60,60,60,${0.3+0.2*Math.sin(frame*0.3)})`;
-        ctx.beginPath(); ctx.arc(cxp+dir*10-dir*8, -4, 9, 0, 7); ctx.fill();
+    if (SPR) {
+      const step = (w - 8) / e.cars;
+      const blit = (spr, lx, fx) => {            // fx = espelho horizontal
+        const dw = step*(spr.w/(spr.w-6)), dh = spr.h*(dw/spr.w);
+        ctx.save(); ctx.translate(lx,0); ctx.scale(fx||1,1);
+        ctx.drawImage(spr.a, -dw/2, -dh/2, dw, dh); ctx.restore();
+        nx.save(); nx.translate(e.x+lx, e.y); nx.scale(fx||1,1);
+        nx.drawImage(spr.n, -dw/2, -dh/2, dw, dh); nx.restore();
+      };
+      for (let i = 0; i < e.cars; i++) {
+        const lx = -w/2 + step*(i+0.5);
+        const isLoco = (dir > 0) ? (i === e.cars-1) : (i === 0);
+        if (isLoco) blit(SPR.trainLoco, lx, dir);
+        else        blit(SPR.trainCar, lx, 1);
       }
-    }
-    // canhões giratórios em 2 vagões, mirando o helicóptero
-    [-w*0.28, w*0.18].forEach(ox => {
-      ctx.save();
-      ctx.translate(ox, 0);
-      const a = Math.atan2(player.y - e.y, player.x - (e.x+ox));
-      ctx.rotate(a);
-      ctx.fillStyle = '#23271b';
-      ctx.fillRect(0, -3, 22, 6);
-      ctx.fillStyle = '#5a6450';
-      ctx.beginPath(); ctx.arc(0,0,8,0,7); ctx.fill();
+      // fumaça da locomotiva (FX vivo, aditivo) sobre a chaminé
+      const lxL = dir>0 ? (w/2 - step*0.5) : (-w/2 + step*0.5);
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      const sf = ctx.createRadialGradient(lxL,-h,1,lxL,-h,13);
+      sf.addColorStop(0,`rgba(70,70,70,${.30+.18*Math.sin(frame*0.3)})`);
+      sf.addColorStop(1,'rgba(60,60,60,0)');
+      ctx.fillStyle = sf;
+      ctx.beginPath(); ctx.arc(lxL,-h,13,0,7); ctx.fill();
       ctx.restore();
-    });
+      // canhão de topo girando, mirando o helicóptero
+      const ang = Math.atan2(player.y - e.y, player.x - e.x);
+      const G = SPR.trainGun, gs = (h*1.25)/G.h;
+      const gw = G.w*gs, gh = G.h*gs;
+      ctx.save(); ctx.rotate(ang);
+      ctx.drawImage(G.a, -gw/2, -gh/2, gw, gh);
+      ctx.restore();
+      nx.save(); nx.translate(e.x, e.y); nx.rotate(ang);
+      nx.drawImage(G.n, -gw/2, -gh/2, gw, gh);
+      nx.restore();
+    }
     ctx.restore();
     return;
   }
   if (e.t === 'tank') {
-    // casco + esteiras giram conforme a manobra (até ±45°)
-    ctx.save();
-    ctx.rotate(-(e.head || 0));
-    ctx.fillStyle = '#2c2c2c';
-    ctx.fillRect(-w/2, -h/2, 7, h);
-    ctx.fillRect(w/2-7, -h/2, 7, h);
-    ctx.fillStyle = '#555';
-    const tread = (Math.floor((e.y + scrollY) / 5)) % 2;
-    for (let i = 0; i < h; i += 6) {
-      if (((i/6)|0) % 2 === tread) {
-        ctx.fillRect(-w/2, -h/2 + i, 7, 3);
-        ctx.fillRect(w/2-7, -h/2 + i, 7, 3);
-      }
-    }
-    // casco (hull)
-    ctx.fillStyle = e.col;
-    ctx.fillRect(-w/2+6, -h/2+3, w-12, h-6);
-    ctx.fillStyle = '#6e5e38';
-    ctx.fillRect(-w/2+6, -h/2+3, w-12, 4);
-    ctx.fillStyle = '#7a6a40';
-    ctx.fillRect(-w/2+6, h/2-9, w-12, 4);  // proa frontal
-    ctx.restore();
-    // torre giratória apontando pro jogador (independe do casco)
+    // casco/esteiras assados (giram conforme a manobra até ±45°),
+    // torre assada girando independente mirando o player
+    const sc = w/30, hd = -(e.head || 0);
     const ang = Math.atan2(player.y - e.y, player.x - e.x);
-    ctx.rotate(ang);                     // +x local aponta no jogador
-    ctx.fillStyle = '#3c3320';
-    ctx.fillRect(0, -3, 24, 6);          // canhão longo p/ o jogador
-    ctx.fillStyle = '#5a4d2c';
-    ctx.beginPath();
-    ctx.arc(0, 0, 9, 0, 7); ctx.fill();  // torre redonda
-    ctx.fillStyle = '#3c3320';
-    ctx.beginPath();
-    ctx.arc(0, 0, 4, 0, 7); ctx.fill();  // escotilha
+    if (SPR) {
+      const T=SPR.tank, U=SPR.turret;
+      ctx.save(); ctx.rotate(hd);
+      ctx.drawImage(T.a, -T.w/2*sc, -T.h/2*sc, T.w*sc, T.h*sc);
+      ctx.restore();
+      ctx.save(); ctx.rotate(ang);
+      ctx.drawImage(U.a, -U.w/2*sc, -U.h/2*sc, U.w*sc, U.h*sc);
+      ctx.restore();
+      nx.save(); nx.translate(e.x, e.y); nx.rotate(hd);
+      nx.drawImage(T.n, -T.w/2*sc, -T.h/2*sc, T.w*sc, T.h*sc);
+      nx.restore();
+      nx.save(); nx.translate(e.x, e.y); nx.rotate(ang);
+      nx.drawImage(U.n, -U.w/2*sc, -U.h/2*sc, U.w*sc, U.h*sc);
+      nx.restore();
+    }
   } else if (e.t === 'ship') {
     // ---- canhoneira: proa segue o curso do rio ----
     const rang = Math.atan2(
@@ -2015,42 +2293,37 @@ function drawEnemy(e) {
       ctx.restore();
     });
   } else { // ---- caça a jato (nariz em +y) ----
-    // chama do pós-combustor (atrás = -y)
-    ctx.fillStyle = `rgba(255,${150+Math.random()*80|0},40,.8)`;
-    ctx.beginPath();
-    ctx.moveTo(-4,-h/2); ctx.lineTo(0,-h/2-9-Math.random()*5);
-    ctx.lineTo(4,-h/2); ctx.closePath(); ctx.fill();
-    // fuselagem
-    const jg = ctx.createLinearGradient(-w/2,0,w/2,0);
-    jg.addColorStop(0,'#7a8390'); jg.addColorStop(.5,'#c2c9d2');
-    jg.addColorStop(1,'#7a8390');
-    ctx.fillStyle = jg;
-    ctx.beginPath();
-    ctx.moveTo(0, h/2);                       // nariz
-    ctx.lineTo(4, 0); ctx.lineTo(3, -h/2);
-    ctx.lineTo(-3, -h/2); ctx.lineTo(-4, 0);
-    ctx.closePath(); ctx.fill();
-    // asas em delta
-    ctx.fillStyle = '#9aa3b0';
-    ctx.beginPath();
-    ctx.moveTo(0, h/6); ctx.lineTo(w/2, -h/3);
-    ctx.lineTo(w/2-4, -h/2+2); ctx.lineTo(0,-h/8); ctx.closePath(); ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(0, h/6); ctx.lineTo(-w/2, -h/3);
-    ctx.lineTo(-w/2+4, -h/2+2); ctx.lineTo(0,-h/8); ctx.closePath(); ctx.fill();
-    // estabilizadores traseiros
-    ctx.fillStyle = '#7e8794';
-    ctx.beginPath();
-    ctx.moveTo(0,-h/3); ctx.lineTo(7,-h/2); ctx.lineTo(0,-h/2.4);
-    ctx.lineTo(-7,-h/2); ctx.closePath(); ctx.fill();
-    // canopy
-    ctx.fillStyle = '#bfe9ff';
-    ctx.beginPath(); ctx.ellipse(0, h/6, 3.2, 6, 0, 0, 7); ctx.fill();
+    // chama do pós-combustor (FX vivo, atrás = -y) — 2 motores
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    [-2.2, 2.2].forEach(ox => {
+      const fl = ctx.createLinearGradient(0,-h/2,0,-h/2-12);
+      fl.addColorStop(0,`rgba(255,${200+Math.random()*55|0},90,.95)`);
+      fl.addColorStop(.5,'rgba(255,140,40,.7)');
+      fl.addColorStop(1,'rgba(255,90,20,0)');
+      ctx.fillStyle = fl;
+      ctx.beginPath();
+      ctx.moveTo(ox-3,-h/2); ctx.lineTo(ox,-h/2-9-Math.random()*6);
+      ctx.lineTo(ox+3,-h/2); ctx.closePath(); ctx.fill();
+    });
+    ctx.restore();
+    // corpo HD assado (albedo local; normal no cvN absoluto)
+    if (SPR) {
+      const J = SPR.jet, scl = w/28, dw = J.w*scl, dh = J.h*scl;
+      ctx.drawImage(J.a, -dw/2, -dh/2, dw, dh);
+      nx.save(); nx.translate(e.x, e.y);
+      nx.drawImage(J.n, -dw/2, -dh/2, dw, dh);
+      nx.restore();
+    }
   }
   ctx.restore();
 }
 
 function render() {
+  // limpa o G-buffer de normais p/ "plano" (#8080ff = normal pra cima)
+  nx.setTransform(1,0,0,1,0,0);
+  nx.fillStyle = '#8080ff';
+  nx.fillRect(0, 0, W, H);
+
   ctx.save();
   if (shake > 0.4)
     ctx.translate((Math.random()-.5)*shake, (Math.random()-.5)*shake);
@@ -2063,20 +2336,20 @@ function render() {
   // pontes: só os barcos passam por baixo
   drawBridgesOver();
 
-  // tiros do player: tracer com brilho (por cima da ponte)
-  ctx.save();
-  ctx.shadowColor = '#ffd23c'; ctx.shadowBlur = 9;
+  // tiros do player (o glow vem do bloom WebGL — sem shadowBlur, que
+  // era caríssimo por bala e causava engasgo com muitos canhões)
   bullets.forEach(b => {
     if (b.mis) {
-      // míssil do player (aponta p/ cima)
-      const fl = ctx.createLinearGradient(0, b.y+4, 0, b.y+18);
-      fl.addColorStop(0, 'rgba(255,210,40,.9)');
-      fl.addColorStop(.6, 'rgba(255,150,30,.7)');
-      fl.addColorStop(1, 'rgba(255,90,20,0)');
-      ctx.fillStyle = fl;
+      // míssil do player (aponta p/ cima) — chama em 2 tons sólidos
+      const ff = 14 + (frame*7 + b.x|0) % 7;             // flicker barato
+      ctx.fillStyle = 'rgba(255,150,30,.55)';
       ctx.beginPath();
-      ctx.moveTo(b.x-3, b.y+4); ctx.lineTo(b.x, b.y+16+Math.random()*6);
+      ctx.moveTo(b.x-3, b.y+4); ctx.lineTo(b.x, b.y+ff);
       ctx.lineTo(b.x+3, b.y+4); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = 'rgba(255,225,90,.95)';
+      ctx.beginPath();
+      ctx.moveTo(b.x-2, b.y+4); ctx.lineTo(b.x, b.y+ff*0.6);
+      ctx.lineTo(b.x+2, b.y+4); ctx.closePath(); ctx.fill();
       ctx.fillStyle = '#9aa0a8';                       // corpo
       ctx.fillRect(b.x-3, b.y-4, 6, 12);
       ctx.fillStyle = '#d8362a';                       // ogiva
@@ -2093,7 +2366,6 @@ function render() {
     ctx.fillStyle = b.side ? '#2ad6c8' : '#ffb020';
     ctx.fillRect(b.x-b.w/2, b.y-b.h/2+b.h*0.55, b.w, b.h*0.45);
   });
-  ctx.restore();
 
   // demais inimigos por cima da ponte (passam por cima)
   enemies.forEach(e => { if (!onWater(e)) drawEnemy(e); });
@@ -2460,11 +2732,17 @@ function drawBoss() {
   ctx.fillStyle = '#23271b';
   ctx.beginPath(); ctx.arc(0,0,7,0,7); ctx.fill();
 
-  // flash de dano (só quando ferido — sem caixa fixa em volta)
+  // flash de dano: brilho vermelho radial sobre o corpo (sem quadrado)
   if (hurt) {
-    ctx.strokeStyle = `rgba(255,60,40,${.3+gl*.3})`;
-    ctx.lineWidth = 3;
-    ctx.strokeRect(-W2, -H2-30, b.w, b.h+60);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const r = Math.max(W2, H2) * 1.15;
+    const fg = ctx.createRadialGradient(0, 0, r*0.35, 0, 0, r);
+    fg.addColorStop(0, `rgba(255,70,45,${.30+gl*.30})`);
+    fg.addColorStop(1, 'rgba(255,40,30,0)');
+    ctx.fillStyle = fg;
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.fill();
+    ctx.restore();
   }
 
   ctx.restore();
@@ -2526,8 +2804,18 @@ let present = () => {};                       // fallback (sem WebGL)
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
 
+  // textura do G-buffer de normais (mesma orientação do cv)
+  const nrmTex=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D,nrmTex);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+
   const bw=W>>1, bh=H>>1;                     // bloom em meia resolução
   const bright=target(bw,bh), blurA=target(bw,bh), blurB=target(bw,bh);
+  const lit=target(W,H);                      // cena já iluminada (full-res)
+  const MAXL=16;                              // máx. de luzes dinâmicas
 
   const pBright=prog(
     'precision mediump float;varying vec2 uv;uniform sampler2D t;'+
@@ -2549,6 +2837,31 @@ let present = () => {};                       // fallback (sem WebGL)
     's+=(texture2D(t,uv+o2).rgb+texture2D(t,uv-o2).rgb)*0.0702702703;'+
     'gl_FragColor=vec4(s,1.);}');
 
+  // ILUMINAÇÃO: sol direcional + especular + luzes dinâmicas, via normais
+  const pLight=prog(
+    'precision mediump float;varying vec2 uv;'+
+    'uniform sampler2D src,nrm;uniform vec2 res;'+
+    'uniform vec3 sun;uniform float amb;'+
+    'uniform int ln;uniform vec3 lpos[16];uniform vec3 lcol[16];'+
+    'void main(){vec3 al=texture2D(src,uv).rgb;'+
+    'vec3 N=normalize(texture2D(nrm,uv).xyz*2.0-1.0);'+
+    'float sd=max(dot(N,sun),0.0);'+
+    'vec3 lite=vec3(amb)+vec3(1.05,1.0,0.9)*sd*0.85;'+
+    'vec3 hv=normalize(sun+vec3(0.0,0.0,1.0));'+
+    'lite+=vec3(1.0)*pow(max(dot(N,hv),0.0),24.0)*0.22;'+   // especular sol
+    'vec2 px=vec2(uv.x*res.x,(1.0-uv.y)*res.y);'+
+    'for(int i=0;i<16;i++){ if(i>=ln) break;'+
+    'vec3 lp=lpos[i];vec2 d=lp.xy-px;float dd=length(d);'+
+    'float at=clamp(1.0-dd/lp.z,0.0,1.0);at*=at;'+
+    'vec3 ld=normalize(vec3(d,lp.z*0.55));'+
+    'float df=max(dot(N,ld),0.0);'+
+    'lite+=lcol[i]*(df*0.75+0.25)*at; }'+
+    'vec3 c=al*lite;'+
+    'float K=0.80, m=max(c.r,max(c.g,c.b));'+     // joelho no canal mais forte
+    'float mk=(m<=K)?m:K+(1.0-K)*(1.0-exp(-(m-K)/(1.0-K)));'+
+    'c*=(m>0.0001)?mk/m:1.0;'+                     // escala uniforme: matiz/sat intactos
+    'gl_FragColor=vec4(c,1.0);}');
+
   const pFinal=prog(
     'precision mediump float;varying vec2 uv;'+
     'uniform sampler2D scn;uniform sampler2D blm;'+
@@ -2558,6 +2871,19 @@ let present = () => {};                       // fallback (sem WebGL)
     'vec2 vg=c*(1.-c.yx);'+                            // vinheta leve
     'col*=clamp(pow(vg.x*vg.y*60.0,0.12),0.,1.);'+
     'gl_FragColor=vec4(col,1.);}');
+
+  const uLsrc=gl.getUniformLocation(pLight,'src');
+  const uLnrm=gl.getUniformLocation(pLight,'nrm');
+  const uLres=gl.getUniformLocation(pLight,'res');
+  const uLsun=gl.getUniformLocation(pLight,'sun');
+  const uLamb=gl.getUniformLocation(pLight,'amb');
+  const uLln =gl.getUniformLocation(pLight,'ln');
+  const uLpos=gl.getUniformLocation(pLight,'lpos[0]');
+  const uLcol=gl.getUniformLocation(pLight,'lcol[0]');
+  const lPos=new Float32Array(MAXL*3), lCol=new Float32Array(MAXL*3);
+  // sol: vindo de cima-esquerda, voltado ao observador (espaço y p/ baixo)
+  const SUN=(()=>{ let x=-0.42,y=-0.46,z=0.78;
+    const m=Math.hypot(x,y,z); return [x/m,y/m,z/m]; })();
 
   const uBrT=gl.getUniformLocation(pBright,'t');
   const uBlT=gl.getUniformLocation(pBlur,'t');
@@ -2589,12 +2915,33 @@ let present = () => {};                       // fallback (sem WebGL)
 
   present=function(){
     if(!glc.width) resize();
-    // 1. canvas 2D -> textura
+    // 1. canvas 2D (albedo) e G-buffer de normais -> texturas
     gl.bindTexture(gl.TEXTURE_2D,srcTex);
     gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,cv);
-    // 2. bright-pass
-    gl.useProgram(pBright);
+    gl.bindTexture(gl.TEXTURE_2D,nrmTex);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,cvN);
+
+    // 2. ILUMINAÇÃO: sol + luzes dinâmicas usando as normais -> lit
+    const Ls=collectLights(); const n=Math.min(Ls.length,MAXL);
+    for(let i=0;i<n;i++){ const a=Ls[i];
+      lPos[i*3]=a[0]; lPos[i*3+1]=a[1]; lPos[i*3+2]=a[2];
+      lCol[i*3]=a[3]*a[6]; lCol[i*3+1]=a[4]*a[6]; lCol[i*3+2]=a[5]*a[6]; }
+    gl.useProgram(pLight);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,srcTex);
+    gl.uniform1i(uLsrc,0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,nrmTex);
+    gl.uniform1i(uLnrm,1);
+    gl.uniform2f(uLres,W,H);
+    gl.uniform3f(uLsun,SUN[0],SUN[1],SUN[2]);
+    gl.uniform1f(uLamb,0.42);
+    gl.uniform1i(uLln,n);
+    gl.uniform3fv(uLpos,lPos); gl.uniform3fv(uLcol,lCol);
+    pass(pLight,lit);
+    gl.activeTexture(gl.TEXTURE0);
+
+    // 3. bright-pass (a partir da cena iluminada)
+    gl.useProgram(pBright);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,lit.tx);
     gl.uniform1i(uBrT,0); pass(pBright,bright);
     // 3. blur gaussiano separável (2 passadas p/ glow largo)
     gl.useProgram(pBlur); gl.uniform1i(uBlT,0);
@@ -2606,9 +2953,9 @@ let present = () => {};                       // fallback (sem WebGL)
     gl.uniform2f(uBlD,2/bw,0);     pass(pBlur,blurA);
     gl.bindTexture(gl.TEXTURE_2D,blurA.tx);
     gl.uniform2f(uBlD,0,2/bh);     pass(pBlur,blurB);
-    // 4. composição final + CRT na tela
+    // 4. composição final: cena iluminada + bloom + vinheta
     gl.useProgram(pFinal);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,srcTex);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,lit.tx);
     gl.uniform1i(uFnS,0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,blurB.tx);
     gl.uniform1i(uFnB,1);
@@ -2634,6 +2981,7 @@ function loop() {
   }
   requestAnimationFrame(loop);
 }
+buildSprites();
 reset();
 loop();
 </script>

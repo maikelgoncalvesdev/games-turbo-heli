@@ -24,9 +24,9 @@ A direção de arte busca um look **cartoon/arcade** limpo, legível e com volum
   metais frios nos veículos, acentos quentes (laranja/amarelo) em fogo e tiros,
   ciano/dourado na interface.
 - **Brilho aditivo** (`globalCompositeOperation = 'lighter'`) em explosões,
-  rastros, rotor e flashes — fogo "de verdade".
+  rastros, rotor e flashes — base para o **bloom WebGL** (ver §12).
 - **Moldura arcade**: gabinete com bordas em gradiente, cantos arredondados,
-  **scanlines + vinheta** (efeito CRT) por cima da tela.
+  e **acabamento por shader WebGL** (tela plana com vinheta leve) — ver §12.
 
 ---
 
@@ -128,7 +128,8 @@ A **bomba não mata o chefe**, mas tira 25% da vida máxima dele.
 - **Dificuldade escalonada** por fase: inimigos ganham +vida, +velocidade e
   tiros mais rápidos; spawn mais frequente (prédios não escalam vida).
 - **Chefes variados** por fase (ciclo de 3, HP crescente).
-- **Upgrades**: tiro frontal `F` (até 3), lateral `S` (até 2), bombas `B`
+- **Upgrades**: tiro frontal `F` (até 3; **nível 3 = mísseis frontais**, com
+  dano maior e explosão), lateral `S` (até 2), bombas `B`
   (máx. 3), vida `1UP`, e **TURBO** (cadência, a cada 40 abates, até nível 2).
   Ao ser **atingido**, perde um nível na ordem `F → S → TURBO`.
 
@@ -166,4 +167,22 @@ A **bomba não mata o chefe**, mas tira 25% da vida máxima dele.
 - Geração procedural determinística (`hash`, `lineList`) para cenário estável.
 - Áudio via **WebAudio** sintetizado → zero questão de direitos autorais.
 - `try/catch` no game loop para um erro nunca congelar o jogo todo.
-- Resolução interna fixa (480×640) escalada por CSS mantendo nitidez.
+- Resolução interna fixa (480×640); o canvas 2D é renderizado offscreen
+  e apresentado via WebGL (ver §12).
+
+---
+
+## 12. Pipeline WebGL (pós-processamento)
+
+Sem libs (WebGL puro, mantém "arquivo único"). O jogo continua sendo
+desenhado **inteiramente em Canvas 2D** num canvas offscreen (`#cv`); a cada
+frame esse canvas vira textura e passa por shaders, com saída no canvas
+visível (`#gl`):
+
+1. **Bright-pass**: extrai as áreas luminosas (`smoothstep` na luminância).
+2. **Blur gaussiano separável** (H/V, meia resolução, 2 passadas) → bloom.
+3. **Composição final**: cena + bloom aditivo, **tela plana** (sem
+   curvatura/máscara/scanlines), apenas com vinheta leve.
+
+Sem WebGL disponível, faz **fallback** automático para o canvas 2D puro
+(zero quebra). A lógica de jogo e toda a arte vetorial não foram tocadas.

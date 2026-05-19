@@ -13,19 +13,24 @@ externos** — toda a arte e todo o áudio são gerados por código.
 ## ▶️ Como jogar
 
 Abra o arquivo [`index.html`](index.html) em qualquer navegador moderno
-(duplo clique já funciona — não precisa de servidor nem build) e pressione
-**ENTER**.
+(duplo clique já funciona — não precisa de servidor nem build). No menu,
+use as **setas** para escolher a dificuldade (**FÁCIL** ou **NORMAL**) e
+pressione **ENTER** para começar.
 
 ### Controles
 
 | Tecla | Ação |
 |---|---|
-| ← ↑ → ↓ | Mover o helicóptero |
+| ← ↑ → ↓ | Mover o helicóptero (no menu: trocar dificuldade) |
 | Espaço | Atirar |
 | B | Soltar bomba (limpa a tela / dana o chefe) |
 | F | Tela cheia |
 | M | Liga/desliga a música |
-| Enter | Iniciar / reiniciar |
+| Enter | Iniciar / pausar / reiniciar |
+
+**No celular/tablet:** controles touch na tela — analógico virtual à
+esquerda para voar, botões **FOGO** e **BOMBA** à direita. Toque na tela
+para iniciar/reiniciar.
 
 ---
 
@@ -41,6 +46,8 @@ Abra o arquivo [`index.html`](index.html) em qualquer navegador moderno
   e **TURBO** (cadência, ganho por abates).
 
 ### Progressão
+- **Dois modos de dificuldade** selecionáveis no menu: **FÁCIL** (inimigos
+  com menos vida, mais bombas e vidas) e **NORMAL**.
 - **Sistema de fases** com banner, barra de progresso e aviso de **PERIGO**.
 - **Dificuldade escalonada**: inimigos mais fortes/rápidos a cada fase
   (começa suave e progride).
@@ -57,6 +64,7 @@ entre eles:
 - 🏜️ **Deserto** — dunas, cactos e rochas
 - ❄️ **Gelo** — placas, rachaduras e pinheiros nevados
 - 🏙️ **Cidade** — quarteirões, vias e prédios (com **lago** no lugar do rio)
+- 🌊 **Oceano** — travessia marítima com inimigos navais
 
 Rios são opcionais e limitados (nascem/terminam arredondados), com água
 animada, pontes de estrada e ferrovia, e bancos de areia.
@@ -78,10 +86,16 @@ animada, pontes de estrada e ferrovia, e bancos de areia.
 
 ```
 .
-├── index.html   # o jogo completo (HTML + CSS + JS em um arquivo)
+├── index.html   # marcação da página
+├── styles.css   # estilos (moldura, HUD, controles touch)
+├── game.js      # toda a lógica do jogo (script clássico, sem build)
 ├── README.md    # este arquivo
+├── todo.md      # backlog de melhorias
 └── design.md    # documento de design / decisões visuais detalhadas
 ```
+
+Continua sem build e sem servidor: o `game.js` é um script clássico, então
+o duplo clique no `index.html` (via `file://`) segue funcionando.
 
 Para detalhes aprofundados de arte e decisões de design, veja
 [`design.md`](design.md).

@@ -15,7 +15,10 @@
       "PowerShell(git add -A)",
       "PowerShell(git remote add origin https://github.com/maikelgoncalvesdev/games-turbo-heli.git)",
       "PowerShell(git branch -M main)",
-      "PowerShell(git push -u origin main)"
+      "PowerShell(git push -u origin main)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }

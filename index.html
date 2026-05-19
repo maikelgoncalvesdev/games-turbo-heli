@@ -244,7 +244,13 @@ function riverHWAt(y) {
   if (waterOf(seg) !== 'river') return 0;
   const wp = scrollY - y;                 // progresso de mundo
   const local = wp - seg * SEG;           // 0..SEG dentro do segmento
-  const R = RIVER_HW;                      // raio da ponta (cap circular)
+  // largura IRREGULAR: estreita/alarga ao longo do leito + rugosidade
+  // de margem (tudo função contínua do mundo -> não pisca)
+  const wf = 0.60
+    + 0.26*(0.5+0.5*Math.sin(wp*0.0086 + 0.9))
+    + 0.14*(0.5+0.5*Math.sin(wp*0.021  + 3.4))
+    + 0.06*Math.sin(wp*0.075);
+  const R = RIVER_HW * Math.max(0.42, wf); // raio (variável) da ponta/leito
   // se o segmento vizinho também é rio, não afina nessa borda (rio contínuo)
   const distStart = waterOf(seg - 1) === 'river' ? 1e9 : local;
   const distEnd   = waterOf(seg + 1) === 'river' ? 1e9 : (SEG - local);
@@ -255,8 +261,14 @@ function riverHWAt(y) {
   return Math.sqrt(R * R - (R - edge) * (R - edge));
 }
 function riverCX(y) {
-  const wy = (y - scrollY) * 0.004;
-  return W*0.5 + Math.sin(wy*2.1) * W*0.28;
+  // soma de senos incomensuráveis -> meandro irregular, contínuo em todo
+  // o mundo (sem emendas), nunca um "S" repetido
+  const m = (y - scrollY);
+  let cx = W*0.5
+    + Math.sin(m*0.0041 + 0.6) * W*0.20
+    + Math.sin(m*0.0107 + 2.3) * W*0.10
+    + Math.sin(m*0.024  + 4.1) * W*0.05;
+  return Math.max(W*0.16, Math.min(W*0.84, cx));
 }
 function inRiver(x, y, margin = 0) {
   const hw = riverHWAt(y);
@@ -272,14 +284,33 @@ function cityLakes() {
     out.push({
       x: W * (0.28 + 0.44 * bhash(s, 5.1)), y: cy,
       rx: 110 + bhash(s, 6.2) * 60, ry: 80 + bhash(s, 7.3) * 50,
+      p1: bhash(s,8.1)*6.28, p2: bhash(s,9.4)*6.28, p3: bhash(s,10.7)*6.28,
     });
   }
   return out;
 }
+// fator radial determinístico (contorno irregular da lagoa)
+function lakeWob(l, a) {
+  return 1
+    + 0.20*Math.sin(3*a + l.p1)
+    + 0.12*Math.sin(5*a + l.p2)
+    + 0.07*Math.sin(2*a + l.p3);
+}
+function lakePath(l, g, pad) {
+  g.beginPath();
+  for (let i = 0; i <= 44; i++) {
+    const a = i/44*Math.PI*2, k = lakeWob(l, a);
+    const x = l.x + (l.rx+pad)*k*Math.cos(a);
+    const y = l.y + (l.ry+pad)*k*Math.sin(a);
+    i ? g.lineTo(x,y) : g.moveTo(x,y);
+  }
+  g.closePath();
+}
 function inLake(x, y, m = 0) {
   return cityLakes().some(l => {
-    const dx = (x - l.x) / (l.rx + m), dy = (y - l.y) / (l.ry + m);
-    return dx*dx + dy*dy < 1;
+    const dx = x - l.x, dy = y - l.y, k = lakeWob(l, Math.atan2(dy, dx));
+    const ex = dx / ((l.rx+m)*k), ey = dy / ((l.ry+m)*k);
+    return ex*ex + ey*ey < 1;
   });
 }
 
@@ -349,9 +380,10 @@ function spawnEnemy() {
   if (Math.random() < 0.10) { spawnTrain(); return; }
   const roll = Math.random();
   let t;
-  if (roll < .45) t = 'tank';
-  else if (roll < .65) t = 'build';
-  else if (roll < .82) t = 'ship';
+  // chance de barco (ship) dobrada: .17 -> .34
+  if (roll < .40) t = 'tank';
+  else if (roll < .55) t = 'build';
+  else if (roll < .89) t = 'ship';
   else t = 'jet';
   let cfg = TYPES[t];
   let x = 30 + Math.random() * (W - 60);
@@ -934,15 +966,15 @@ function update() {
       });
       e.x = Math.max(e.w/2, Math.min(W - e.w/2, e.x));
     }
-    // caça dispara 1 míssil em linha reta vertical, num momento aleatório
-    if (e.t === 'jet') {
-      if (e.mcd === undefined) e.mcd = 20 + (Math.random()*75 | 0);
-      e.mcd--;
-      if (e.mcd === 0 && e.y > 0 && e.y < H*0.72) {
-        eBullets.push({ x:e.x, y:e.y+12, w:8, h:18,
-          vx:0, vy:4.6, missile:true });
-        SFX.hit();
-      }
+    // caça dispara 1 míssil quando fica DE FRENTE para o heli
+    // (alinhado na horizontal e com o heli logo à frente/abaixo)
+    if (e.t === 'jet' && !e.fired && e.y > 0 && e.y < H*0.72 &&
+        e.y < player.y - 20 &&
+        Math.abs(e.x - player.x) < (e.w + player.w) * 0.5) {
+      eBullets.push({ x:e.x, y:e.y+12, w:8, h:18,
+        vx:0, vy:4.6, missile:true });
+      SFX.hit();
+      e.fired = true;
     }
     // porta-aviões lança caças do convés periodicamente
     if (e.t === 'carrier') {
@@ -1073,6 +1105,7 @@ function vnoise(x, y) {
 
 // estradas e trilhos: linhas de período fixo no mundo (rolam sem "pular")
 const ROAD_P = 560, RAIL_P = 740;
+const ROADW = 46;                       // largura da via (asfalto/terra)
 function lineList(P, lo = -50, hi = H + 50) {
   const a = [];
   for (let n = Math.floor((lo - scrollY)/P);
@@ -1124,14 +1157,15 @@ function roadBridge(roadY) {
   if (hw < 20) return;
   const cx = riverCX(roadY+15);
   ctx.fillStyle = '#6e4a2a';
-  ctx.fillRect(cx-hw-10, roadY-3, (hw+10)*2, 36);
+  ctx.fillRect(cx-hw-10, roadY-3, (hw+10)*2, ROADW+6);
   ctx.strokeStyle = '#4d3017'; ctx.lineWidth = 2;
   for (let x = cx-hw-10; x < cx+hw+10; x += 9) {
-    ctx.beginPath(); ctx.moveTo(x, roadY-3); ctx.lineTo(x, roadY+33); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, roadY-3);
+    ctx.lineTo(x, roadY+ROADW+3); ctx.stroke();
   }
   ctx.fillStyle = '#8a5e36';
   ctx.fillRect(cx-hw-12, roadY-5, (hw+12)*2, 4);
-  ctx.fillRect(cx-hw-12, roadY+31, (hw+12)*2, 4);
+  ctx.fillRect(cx-hw-12, roadY+ROADW+1, (hw+12)*2, 4);
 }
 function drawBridgesOver() {   // chamado após desenhar os barcos
   gRails.forEach(railBridge);
@@ -1175,6 +1209,83 @@ function bakeSprite(w,h, albedoFn, heightFn){
   hc.save(); hc.translate(w/2,h/2); heightFn(hc); hc.restore();
   return { a, n: heightToNormal(hh, 2.4), w, h };
 }
+// textura de normal de ÁGUA: ondas cruzadas ORGÂNICAS (vários trens de
+// onda em ângulos diferentes + detalhe fino) — tileável (harmônicos
+// inteiros de T) e sem aparência de "listras"
+function bakeWaterNormal(T){
+  const c=_cv(T,T), g=c.getContext('2d');
+  const img=g.createImageData(T,T), d=img.data, P=2*Math.PI/T;
+  // trens de onda: [kx, ky, amp, fase] com kx,ky inteiros (tileável)
+  const W=[
+    [ 3, 1, 1.00, 0.0 ],
+    [ 1,-2, 0.80, 1.7 ],
+    [ 2, 3, 0.55, 3.1 ],
+    [-4, 1, 0.45, 0.6 ],
+    [ 5, 4, 0.30, 2.2 ],
+    [ 2,-6, 0.22, 4.0 ],
+  ];
+  for(let y=0;y<T;y++) for(let x=0;x<T;x++){
+    const i=(y*T+x)*4;
+    let hgt=0;
+    for(const [kx,ky,amp,ph] of W)
+      hgt += Math.sin(P*(kx*x+ky*y)+ph)*amp;
+    // pequena modulação cruzada p/ quebrar regularidade (ainda tileável)
+    hgt += Math.sin(P*(x))*Math.sin(P*(2*y))*0.25;
+    const v = 128 + hgt*11;
+    d[i]=d[i+1]=d[i+2]=v; d[i+3]=255;
+  }
+  g.putImageData(img,0,0);
+  return heightToNormal(c, 1.1);
+}
+// textura de ÁGUA: ruído fractal (fBm) por pixel, tileável + cintilância
+// esparsa — superfície turbulenta contínua (como a foto vista do alto)
+function _vlat(ix,iy,P,sd){
+  ix=((ix%P)+P)%P; iy=((iy%P)+P)%P;
+  let h=(ix*374761393 + iy*668265263 + sd*362437)>>>0;
+  h=Math.imul(h ^ (h>>>13),1274126177)>>>0;
+  return (h>>>0)/4294967296;
+}
+function _vnoise(x,y,P,sd){
+  const x0=Math.floor(x), y0=Math.floor(y);
+  const fx=x-x0, fy=y-y0;
+  const u=fx*fx*(3-2*fx), v=fy*fy*(3-2*fy);
+  const a=_vlat(x0,y0,P,sd),     b=_vlat(x0+1,y0,P,sd);
+  const c=_vlat(x0,y0+1,P,sd),   d=_vlat(x0+1,y0+1,P,sd);
+  return a+(b-a)*u + (c-a)*v + (a-b-c+d)*u*v;
+}
+function bakeWaterSpeckle(T, sd0){
+  sd0 = sd0||17;
+  const c=_cv(T,T), g=c.getContext('2d');
+  const img=g.createImageData(T,T), D=img.data;
+  // octaves: período (células) que divide -> tileável; y mais "esticado"
+  // que x => micro-ondas levemente alongadas (direção do vento)
+  const OCT=[[6,0.50],[12,0.27],[24,0.15],[48,0.08]];
+  for(let py=0;py<T;py++) for(let px=0;px<T;px++){
+    let f=0, hi=0;
+    for(let o=0;o<OCT.length;o++){
+      const P=OCT[o][0], am=OCT[o][1];
+      const nx=px/T*P, ny=py/T*P*1.7;          // anisotropia (1.7)
+      const nv=_vnoise(nx,ny,P,sd0+o*7);
+      f+=nv*am; if(o>=2) hi+=nv*am;
+    }
+    // f ~0..1 (soma dos amps = 1). centra em 0 -> claro/escuro
+    const t=(f-0.5);
+    // mistura escuro<->claro conforme o ruído (superfície contínua)
+    let R,Gc,B;
+    if(t>=0){ const k=Math.min(1,t*2.4);
+      R=20+k*150; Gc=46+k*150; B=70+k*150; }
+    else    { const k=Math.min(1,-t*2.4);
+      R=20-k*14; Gc=46-k*30; B=70-k*40; }
+    // cintilância esparsa: só onde as oitavas finas batem alto
+    let A=0.34;
+    if(hi>0.165){ const s=Math.min(1,(hi-0.165)*9);
+      R+=s*120; Gc+=s*120; B+=s*120; A=0.34+s*0.30; }
+    const i=(py*T+px)*4;
+    D[i]=R; D[i+1]=Gc; D[i+2]=B; D[i+3]=A*255;
+  }
+  g.putImageData(img,0,0);
+  return c;
+}
 // pincel de relevo: bolha radial clara (volume arredondado)
 function hBlob(g,x,y,rx,ry,hi,lo){
   const grd=g.createRadialGradient(x,y,0,x,y,Math.max(rx,ry));
@@ -1187,50 +1298,106 @@ function hBlob(g,x,y,rx,ry,hi,lo){
 
 let SPR = null;
 function buildSprites(){
-  // ---- HELICÓPTERO DO PLAYER (48x76) ----
-  const heli = bakeSprite(48,76, a=>{
-    // lança de cauda
-    let g=a.createLinearGradient(-5,0,5,0);
-    g.addColorStop(0,'#3a6b2d'); g.addColorStop(.5,'#5a9145');
-    g.addColorStop(1,'#2f5524'); a.fillStyle=g;
-    a.beginPath(); a.moveTo(-4,6); a.lineTo(4,6);
-    a.lineTo(2.5,30); a.lineTo(-2.5,30); a.closePath(); a.fill();
-    a.fillStyle='#27461c'; a.fillRect(-10,24,20,5);
-    // fuselagem com volume (gradiente diagonal: luz vinda de cima-esq)
-    g=a.createLinearGradient(-12,-20,12,16);
-    g.addColorStop(0,'#7fc063'); g.addColorStop(.45,'#4f8a3a');
-    g.addColorStop(1,'#2d5a22'); a.fillStyle=g;
-    a.beginPath(); a.ellipse(0,-2,12,20,0,0,7); a.fill();
-    // nariz
-    g=a.createRadialGradient(-3,-15,1,0,-12,11);
-    g.addColorStop(0,'#9ad27e'); g.addColorStop(1,'#3f7a2e');
-    a.fillStyle=g; a.beginPath(); a.ellipse(0,-12,9,10,0,0,7); a.fill();
-    // faixa militar + reflexo
-    a.fillStyle='#33611f'; a.fillRect(-12,-4,24,5);
-    a.fillStyle='rgba(255,255,255,.18)'; a.fillRect(-12,-4,24,1);
-    // cockpit
-    g=a.createLinearGradient(-5,-19,5,-7);
-    g.addColorStop(0,'#eaffff'); g.addColorStop(.5,'#9fd9f5');
-    g.addColorStop(1,'#3c7fa0'); a.fillStyle=g;
-    a.beginPath(); a.ellipse(0,-13,6.5,7.5,0,0,7); a.fill();
-    a.fillStyle='rgba(255,255,255,.65)';
-    a.beginPath(); a.ellipse(-2.5,-15,2,3,-.5,0,7); a.fill();
-    // patins
-    a.strokeStyle='#202020'; a.lineWidth=2.4; a.lineCap='round';
-    a.beginPath(); a.moveTo(-14,-8); a.lineTo(-14,10);
-    a.moveTo(14,-8); a.lineTo(14,10); a.stroke();
-    a.lineWidth=1.6; a.beginPath();
-    a.moveTo(-14,1); a.lineTo(-7,1); a.moveTo(14,1); a.lineTo(7,1); a.stroke();
+  // ---- GUNSHIP DO PLAYER estilo Rambo II / Hind (72x88, nariz -y) ----
+  const heli = bakeSprite(72,88, a=>{
+    // ---- lança de cauda + estabilizadores + deriva ----
+    let g=a.createLinearGradient(-4,0,4,0);
+    g.addColorStop(0,'#2c4a1f'); g.addColorStop(.5,'#4f7a33');
+    g.addColorStop(1,'#22381a'); a.fillStyle=g;
+    a.beginPath(); a.moveTo(-5,12); a.lineTo(5,12);
+    a.lineTo(2.6,36); a.lineTo(-2.6,36); a.closePath(); a.fill();
+    a.fillStyle='#27461c';                       // estabilizador horiz.
+    a.beginPath(); a.moveTo(-12,30); a.lineTo(12,30);
+    a.lineTo(9,36); a.lineTo(-9,36); a.closePath(); a.fill();
+    a.fillStyle='#1c3214';                       // deriva/tail rotor
+    a.beginPath(); a.moveTo(2,30); a.lineTo(9,40);
+    a.lineTo(2,40); a.closePath(); a.fill();
+    // ---- asas em DELTA agressiva; canhões POR BAIXO ----
+    [-1,1].forEach(s=>{
+      // 1) canhão duplo PRIMEIRO (fica sob a asa; canos curtos)
+      a.fillStyle='#121210';
+      a.fillRect(s*20-3.6,-15,2.6,11);
+      a.fillRect(s*20+1.0,-15,2.6,11);
+      a.fillStyle='#2a2a24';                  // fairing do canhão
+      a.beginPath(); a.ellipse(s*20,-3,4.6,6,0,0,7); a.fill();
+      // 2) asa delta varrida por cima, PONTA RETA (cobre a base do canhão)
+      g=a.createLinearGradient(0,-16,0,16);
+      g.addColorStop(0,'#6fa049'); g.addColorStop(.5,'#487a31');
+      g.addColorStop(1,'#22401a'); a.fillStyle=g;
+      a.beginPath();
+      a.moveTo(s*4,-18);                 // bordo de ataque na raiz (à frente)
+      a.lineTo(s*38,6);                  // ponta — canto dianteiro
+      a.lineTo(s*38,15);                 // ponta — borda RETA (vertical)
+      a.lineTo(s*6,10);                  // bordo de fuga curto na raiz
+      a.closePath(); a.fill();
+      a.fillStyle='rgba(195,228,150,.18)';   // bisel do bordo de ataque
+      a.beginPath();
+      a.moveTo(s*4,-18); a.lineTo(s*38,6); a.lineTo(s*34,7);
+      a.lineTo(s*6,-10); a.closePath(); a.fill();
+      a.fillStyle='rgba(20,40,15,.30)';      // sombra do bordo de fuga
+      a.beginPath();
+      a.moveTo(s*38,15); a.lineTo(s*6,10); a.lineTo(s*10,12); a.closePath(); a.fill();
+    });
+    // ---- fuselagem gunship esguia (nariz -y) ----
+    g=a.createLinearGradient(-11,-30,12,20);
+    g.addColorStop(0,'#86b85e'); g.addColorStop(.45,'#4a7c32');
+    g.addColorStop(1,'#23401a'); a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(0,-42); a.lineTo(5,-34); a.lineTo(8,-16);
+    a.lineTo(9,6); a.lineTo(5,18); a.lineTo(3,28);
+    a.lineTo(-3,28); a.lineTo(-5,18); a.lineTo(-9,6);
+    a.lineTo(-8,-16); a.lineTo(-5,-34); a.closePath(); a.fill();
+    // quilha/sombra inferior
+    a.fillStyle='rgba(20,40,15,.45)';
+    a.beginPath(); a.moveTo(-9,4); a.lineTo(9,4);
+    a.lineTo(4,26); a.lineTo(-4,26); a.closePath(); a.fill();
+    // lombada clara
+    a.fillStyle='rgba(190,225,150,.20)';
+    a.fillRect(-2,-32,4,52);
+    // naceles de motor (escapes) atrás do rotor
+    a.fillStyle='#33301f';
+    a.fillRect(-9,6,5,8); a.fillRect(4,6,5,8);
+    // ---- canopies em TANDEM (vidro verde/dourado, escalonado) ----
+    const cano=(cy,rx,ry)=>{
+      const gg=a.createLinearGradient(0,cy-ry,0,cy+ry);
+      gg.addColorStop(0,'#eafff0'); gg.addColorStop(.5,'#7fae74');
+      gg.addColorStop(1,'#244a2a'); a.fillStyle=gg;
+      a.beginPath(); a.ellipse(0,cy,rx,ry,0,0,7); a.fill();
+      a.fillStyle='rgba(255,255,255,.55)';
+      a.beginPath(); a.ellipse(-rx*0.35,cy-ry*0.4,rx*0.3,ry*0.35,0,0,7);
+      a.fill();
+    };
+    a.fillStyle='#1f3a16'; a.fillRect(-6,-30,12,26);  // moldura
+    cano(-25,4,5.5);                                   // artilheiro (frente)
+    cano(-13,5,6.5);                                   // piloto (atrás, alto)
+    // ---- canhão de queixo (torre + canos) ----
+    a.fillStyle='#1b1b1b';
+    a.beginPath(); a.arc(0,-34,4.5,0,7); a.fill();
+    a.fillStyle='#0d0d0d';
+    a.fillRect(-2.4,-44,1.8,10); a.fillRect(0.6,-44,1.8,10);
+    // skids
+    a.strokeStyle='#1c1c1c'; a.lineWidth=2.4; a.lineCap='round';
+    a.beginPath(); a.moveTo(-16,-6); a.lineTo(-16,16);
+    a.moveTo(16,-6); a.lineTo(16,16); a.stroke();
+    a.lineWidth=1.6;
+    a.beginPath(); a.moveTo(-16,4); a.lineTo(-7,2);
+    a.moveTo(16,4); a.lineTo(7,2); a.stroke();
   }, h=>{
-    // relevo: boom baixo, fuselagem em domo, nariz/cockpit salientes
-    h.fillStyle='#3a3a3a';
-    h.beginPath(); h.moveTo(-4,6); h.lineTo(4,6);
-    h.lineTo(2.5,30); h.lineTo(-2.5,30); h.closePath(); h.fill();
-    hBlob(h,0,-2,13,21,210,70);          // domo da fuselagem
-    hBlob(h,0,-12,10,11,235,110);        // nariz mais alto
-    hBlob(h,0,-13,7,8,255,150);          // bolha do cockpit
-    h.fillStyle='#3a3a3a'; h.fillRect(-14,-8,3,18);
-    h.fillRect(11,-8,3,18);              // patins (baixos)
+    h.fillStyle='#343434';                       // boom baixo
+    h.beginPath(); h.moveTo(-5,12); h.lineTo(5,12);
+    h.lineTo(2.6,38); h.lineTo(-2.6,38); h.closePath(); h.fill();
+    // canhões (baixos, sob a asa) primeiro
+    hBlob(h,-20,-3,5,7,170,40); hBlob(h,20,-3,5,7,170,40);
+    h.fillStyle='#5e5e5e';                        // asas delta (ponta reta)
+    [-1,1].forEach(s=>{ h.beginPath();
+      h.moveTo(s*4,-18); h.lineTo(s*38,6); h.lineTo(s*38,15);
+      h.lineTo(s*6,10); h.closePath(); h.fill(); });
+    hBlob(h,0,-8,9,30,235,60);                   // espinha da fuselagem
+    hBlob(h,0,-13,6,8,255,140);                  // domo do piloto
+    hBlob(h,0,-25,4.5,6,250,150);                // domo do artilheiro
+    hBlob(h,0,-34,5,5,235,150);                  // torre do canhão
+    h.fillStyle='#343434';
+    h.fillRect(-17,-6,3,22); h.fillRect(14,-6,3,22); // skids
   });
 
   // ---- CASCO + ESTEIRAS DO TANQUE (44x44) ----
@@ -1437,8 +1604,740 @@ function buildSprites(){
     hBlob(h,0,8.5,3,5,255,150);                        // bolha do canopy
   });
 
+  // ---- BUNKER/FORTIM de concreto (48x48, corpo ~40) ----
+  const bunker = bakeSprite(48,48, a=>{
+    // anel de concreto chanfrado
+    let g=a.createLinearGradient(0,-20,0,20);
+    g.addColorStop(0,'#a59a85'); g.addColorStop(.5,'#7d7461');
+    g.addColorStop(1,'#4f4838'); a.fillStyle=g;
+    a.fillRect(-20,-20,40,40);
+    a.fillStyle='rgba(255,250,235,.22)'; a.fillRect(-20,-20,40,3);
+    a.fillStyle='rgba(0,0,0,.40)'; a.fillRect(-20,16,40,4);
+    a.fillStyle='rgba(0,0,0,.18)';                   // chanfros cantos
+    [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([sx,sy])=>{
+      a.beginPath(); a.moveTo(sx*20,sy*20);
+      a.lineTo(sx*20,sy*12); a.lineTo(sx*12,sy*20);
+      a.closePath(); a.fill(); });
+    // plataforma recuada
+    g=a.createLinearGradient(0,-13,0,13);
+    g.addColorStop(0,'#6f6857'); g.addColorStop(1,'#4a4435');
+    a.fillStyle=g; a.fillRect(-13,-13,26,26);
+    // seteiras nas 4 faces
+    a.fillStyle='#101012';
+    a.fillRect(-7,-19,14,3); a.fillRect(-7,16,14,3);
+    a.fillRect(-19,-7,3,14); a.fillRect(16,-7,3,14);
+    // sacos de areia nos cantos (clusters)
+    a.fillStyle='#a8975f';
+    [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([sx,sy])=>{
+      for(let i=0;i<3;i++){ a.beginPath();
+        a.arc(sx*(15-i*4), sy*15, 4.2,0,7);
+        a.fillStyle=i%2?'#b6a468':'#94834f'; a.fill(); }
+    });
+    // manchas/umidade no concreto
+    a.fillStyle='rgba(60,55,42,.30)';
+    a.fillRect(-13,-2,26,3); a.fillRect(-2,-13,3,26);
+    // base da cúpula central
+    g=a.createRadialGradient(-3,-3,1,0,0,12);
+    g.addColorStop(0,'#5a564d'); g.addColorStop(1,'#2c2a24');
+    a.fillStyle=g; a.beginPath(); a.arc(0,0,11,0,7); a.fill();
+  }, h=>{
+    hBlob(h,0,0,21,21,210,150);                      // bloco maciço (alto)
+    h.fillStyle='#c9c9c9'; h.fillRect(-13,-13,26,26); // plataforma plana alta
+    const sb=(x,y)=>hBlob(h,x,y,5,5,240,150);
+    [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([sx,sy])=>{
+      for(let i=0;i<3;i++) sb(sx*(15-i*4), sy*15); });
+    hBlob(h,0,0,11,11,235,140);                      // cúpula
+  });
+
+  // ---- CANHÃO ANTIAÉREO do bunker (44x22, pivô centro-esq) ----
+  const bunkerGun = bakeSprite(44,22, a=>{
+    let g=a.createLinearGradient(0,-3.5,0,3.5);
+    g.addColorStop(0,'#3a382f'); g.addColorStop(1,'#161510');
+    a.fillStyle=g; a.fillRect(4,-3.5,22,7);           // cano
+    a.fillStyle='#0c0b08'; a.fillRect(24,-4.5,4,9);   // freio de boca
+    g=a.createRadialGradient(-2,-2,1,0,0,11);
+    g.addColorStop(0,'#5e5a4c'); g.addColorStop(.6,'#3c3a30');
+    g.addColorStop(1,'#1c1b16'); a.fillStyle=g;
+    a.beginPath(); a.arc(0,0,10,0,7); a.fill();       // cúpula blindada
+    a.fillStyle='#2a281f';
+    a.fillRect(-11,-9,9,18);                          // contrapeso
+    a.fillStyle='rgba(255,255,255,.14)';
+    a.beginPath(); a.arc(-2,-3,4,0,7); a.fill();
+    a.fillStyle='#100f0b'; a.beginPath();
+    a.arc(0,0,3.4,0,7); a.fill();                     // escotilha
+  }, h=>{
+    h.fillStyle='#8a8a8a'; h.fillRect(4,-3.5,24,7);
+    h.fillStyle='#4a4a4a'; h.fillRect(-11,-9,9,18);
+    hBlob(h,0,0,10,10,245,120);                       // cúpula
+  });
+
+  // ---- TORRE NAVAL reutilizável (40x18, pivô centro-esq) ----
+  const navGun = bakeSprite(40,18, a=>{
+    let g=a.createLinearGradient(0,-3,0,3);
+    g.addColorStop(0,'#586470'); g.addColorStop(1,'#222a32');
+    a.fillStyle=g; a.fillRect(3,-3,19,6);             // cano
+    a.fillStyle='#12161b'; a.fillRect(20,-3.5,3,7);   // boca
+    g=a.createRadialGradient(-2,-2,1,0,0,9);
+    g.addColorStop(0,'#6e7a86'); g.addColorStop(.6,'#414b56');
+    g.addColorStop(1,'#1c2228'); a.fillStyle=g;
+    a.beginPath(); a.arc(0,0,8.5,0,7); a.fill();      // torre
+    a.fillStyle='#11161b'; a.beginPath();
+    a.arc(0,0,3,0,7); a.fill();
+  }, h=>{
+    h.fillStyle='#8a8a8a'; h.fillRect(3,-3,20,6);
+    hBlob(h,0,0,8.5,8.5,245,120);
+  });
+
+  // util p/ casco naval: silhueta com proa em +y
+  const navHull = (a,W2,H2,c0,c1,c2)=>{
+    const g=a.createLinearGradient(-W2,0,W2,0);
+    g.addColorStop(0,c2); g.addColorStop(.5,c1); g.addColorStop(1,c2);
+    a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(0,H2); a.lineTo(W2*0.82,H2*0.34);
+    a.lineTo(W2*0.82,-H2+5);
+    a.quadraticCurveTo(0,-H2-3,-W2*0.82,-H2+5);
+    a.lineTo(-W2*0.82,H2*0.34); a.closePath(); a.fill();
+    a.fillStyle='rgba(255,255,255,.10)';
+    a.beginPath(); a.moveTo(0,H2); a.lineTo(W2*0.5,H2*0.4);
+    a.lineTo(-W2*0.5,H2*0.4); a.closePath(); a.fill();
+    a.fillStyle=c0;                                   // convés
+    a.fillRect(-W2*0.62,-H2*0.5,W2*1.24,H2*1.25);
+  };
+
+  // ---- MONITOR FLUVIAL BLINDADO (60x76; ref 46x60, proa +y) ----
+  const shipHull = bakeSprite(60,76, a=>{
+    // casco facetado com cinta de blindagem
+    let g=a.createLinearGradient(-26,0,26,0);
+    g.addColorStop(0,'#2b333d'); g.addColorStop(.5,'#5a6676');
+    g.addColorStop(1,'#222a33'); a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(0,34);                                   // proa em aríete
+    a.lineTo(11,22); a.lineTo(13,-2); a.lineTo(10,-26);
+    a.lineTo(-10,-26); a.lineTo(-13,-2); a.lineTo(-11,22);
+    a.closePath(); a.fill();
+    a.fillStyle='rgba(0,0,0,.40)';                    // linha d'água
+    a.fillRect(-13,-26,26,3);
+    a.fillStyle='rgba(255,255,255,.12)';
+    a.beginPath(); a.moveTo(0,34); a.lineTo(7,24);
+    a.lineTo(-7,24); a.closePath(); a.fill();
+    // cinta de blindagem rebitada
+    a.fillStyle='#39424f'; a.fillRect(-13,4,26,5);
+    a.fillStyle='#0e1116';
+    for(let rx=-11;rx<=11;rx+=4){ a.beginPath();
+      a.arc(rx,6.5,1,0,7); a.fill(); }
+    // convés com chapas e escotilhas
+    g=a.createLinearGradient(0,-24,0,22);
+    g.addColorStop(0,'#3c4654'); g.addColorStop(1,'#28303a');
+    a.fillStyle=g; a.fillRect(-9,-22,18,42);
+    a.strokeStyle='rgba(0,0,0,.30)'; a.lineWidth=1;
+    for(let yy=-18;yy<18;yy+=7){ a.beginPath();
+      a.moveTo(-9,yy); a.lineTo(9,yy); a.stroke(); }
+    a.fillStyle='#1c2128';                            // escotilhas
+    a.fillRect(-5,12,10,5); a.fillRect(-5,-20,10,4);
+    // ponte/cidadela blindada escalonada + seteiras
+    g=a.createLinearGradient(-9,-8,9,9);
+    g.addColorStop(0,'#8a96a6'); g.addColorStop(.5,'#5e6a7a');
+    g.addColorStop(1,'#39424f'); a.fillStyle=g;
+    a.fillRect(-9,-9,18,17);
+    a.fillStyle='#222a33'; a.fillRect(-9,-9,18,3);
+    a.fillStyle='#0c1014';                            // fendas de visão
+    a.fillRect(-7,-4,14,2.4);
+    a.fillStyle='rgba(150,180,210,.30)'; a.fillRect(-7,-4,14,1);
+    a.fillStyle='#6b7686'; a.fillRect(-5,8,10,4);     // asa de comando
+    // chaminés gêmeas com tampa
+    a.fillStyle='#2b313a';
+    a.fillRect(-6,-19,5,8); a.fillRect(1,-19,5,8);
+    a.fillStyle='#11151a';
+    a.fillRect(-6,-19,5,2); a.fillRect(1,-19,5,2);
+    // mastro com verga + farol
+    a.fillStyle='#9aa6b5'; a.fillRect(-1.5,-25,3,12);
+    a.strokeStyle='#9aa6b5'; a.lineWidth=1.5;
+    a.beginPath(); a.moveTo(-6,-22); a.lineTo(6,-22); a.stroke();
+    a.fillStyle='#ffd24a'; a.beginPath();
+    a.arc(0,-25,1.6,0,7); a.fill();
+    // racks de cargas de profundidade na popa
+    a.fillStyle='#3a4350';
+    a.fillRect(-8,-24,5,4); a.fillRect(3,-24,5,4);
+  }, h=>{
+    hBlob(h,0,-1,13,30,205,60);                       // casco
+    h.fillStyle='#7a7a7a'; h.fillRect(-9,-22,18,42);  // convés plano
+    hBlob(h,0,-1,9,9,250,150);                        // cidadela (alta)
+    hBlob(h,-3,-15,3,5,230,120);                      // chaminés
+    hBlob(h,3,-15,3,5,230,120);
+  });
+
+  // ---- TORRE PRINCIPAL da canhoneira (50x24, pivô centro-esq) ----
+  const shipGun = bakeSprite(50,26, a=>{
+    let g=a.createLinearGradient(0,-4,0,4);
+    g.addColorStop(0,'#566270'); g.addColorStop(1,'#1c232b');
+    a.fillStyle=g;
+    a.fillRect(4,-4.5,22,4); a.fillRect(4,1,22,4);    // canos duplos
+    a.fillStyle='#12161b';
+    a.fillRect(24,-5,4,4); a.fillRect(24,1.5,4,4);    // bocas
+    // torre facetada
+    g=a.createLinearGradient(-9,-9,9,9);
+    g.addColorStop(0,'#8593a3'); g.addColorStop(.5,'#4e596a');
+    g.addColorStop(1,'#272f3a'); a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(-10,-9); a.lineTo(7,-10); a.lineTo(11,0);
+    a.lineTo(7,10); a.lineTo(-10,9); a.closePath(); a.fill();
+    a.fillStyle='rgba(255,255,255,.14)';
+    a.beginPath(); a.moveTo(-10,-9); a.lineTo(7,-10);
+    a.lineTo(7,-7); a.lineTo(-10,-6); a.closePath(); a.fill();
+    a.fillStyle='#11161b'; a.beginPath();
+    a.arc(-1,0,3,0,7); a.fill();
+  }, h=>{
+    h.fillStyle='#8a8a8a'; h.fillRect(4,-4.5,24,9);
+    hBlob(h,-1,0,10,9,245,120);
+  });
+
+  // ---- LANCHA DE PATRULHA (40x52; ref 34x46) ----
+  const boatHull = bakeSprite(40,52, a=>{
+    let g=a.createLinearGradient(-17,0,17,0);
+    g.addColorStop(0,'#7a1f1a'); g.addColorStop(.5,'#c4382c');
+    g.addColorStop(1,'#7a1f1a'); a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(0,24); a.lineTo(14,2); a.lineTo(13,-20);
+    a.lineTo(-13,-20); a.lineTo(-14,2); a.closePath(); a.fill();
+    a.fillStyle='rgba(255,255,255,.14)'; a.fillRect(-13,-20,26,2);
+    a.fillStyle='#4a120f'; a.fillRect(-11,-16,22,28);  // cockpit aberto
+    a.fillStyle='#8c98a5'; a.fillRect(-7,-2,14,11);    // cabine
+    a.fillStyle='#bfe9ff'; a.fillRect(-5,0,10,5);
+    a.fillStyle='rgba(255,255,255,.12)';
+    a.beginPath(); a.moveTo(0,24); a.lineTo(7,6);
+    a.lineTo(-7,6); a.closePath(); a.fill();
+  }, h=>{
+    hBlob(h,0,-2,14,24,215,70);
+    hBlob(h,0,3,8,7,240,140);
+  });
+
+  // ---- DESTRÓIER STEALTH (64x120; ref 54x104, proa +y) ----
+  const warHull = bakeSprite(64,120, a=>{
+    // casco facetado com tumblehome
+    let g;
+    a.fillStyle='#39454f';
+    a.beginPath();
+    a.moveTo(0,54);                                   // proa em lâmina
+    a.lineTo(9,40); a.lineTo(12,16); a.lineTo(12,-34);
+    a.lineTo(8,-50); a.lineTo(-8,-50); a.lineTo(-12,-34);
+    a.lineTo(-12,16); a.lineTo(-9,40); a.closePath(); a.fill();
+    g=a.createLinearGradient(-12,0,12,0);
+    g.addColorStop(0,'#27313b'); g.addColorStop(.5,'#5b6b79');
+    g.addColorStop(1,'#27313b'); a.fillStyle=g;
+    a.beginPath();                                    // convés (tumblehome)
+    a.moveTo(0,50); a.lineTo(8,38); a.lineTo(9,15);
+    a.lineTo(9,-33); a.lineTo(6,-46); a.lineTo(-6,-46);
+    a.lineTo(-9,-33); a.lineTo(-9,15); a.lineTo(-8,38);
+    a.closePath(); a.fill();
+    a.fillStyle='rgba(0,0,0,.40)'; a.fillRect(-12,-50,24,3); // linha d'água popa
+    a.fillStyle='rgba(255,255,255,.10)';
+    a.beginPath(); a.moveTo(0,54); a.lineTo(5,42);
+    a.lineTo(-5,42); a.closePath(); a.fill();
+    // números de proa + faixas
+    a.fillStyle='#cdd6df';
+    a.fillRect(-3,44,1.6,5); a.fillRect(0,44,1.6,5); a.fillRect(3,44,1.6,5);
+    a.fillStyle='#b5302a'; a.fillRect(-9,15,18,2);
+    // ---- VLS: grade de células de mísseis no convés de proa ----
+    a.fillStyle='#161a1f';
+    for(let cy=22; cy<=38; cy+=5) for(let cx=-6; cx<=6; cx+=4)
+      a.fillRect(cx-1.6,cy-1.6,3.2,3.2);
+    a.fillStyle='rgba(255,150,60,.20)'; a.fillRect(-7,21,15,1);
+    // torre principal base (canhão é stamp separado) -> só anel
+    a.fillStyle='#2b333c'; a.beginPath(); a.arc(0,12,7,0,7); a.fill();
+    // ---- superestrutura piramidal stealth ----
+    g=a.createLinearGradient(-10,-6,10,14);
+    g.addColorStop(0,'#8794a3'); g.addColorStop(.5,'#56636f');
+    g.addColorStop(1,'#2f3941'); a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(-10,2); a.lineTo(10,2); a.lineTo(8,-14);
+    a.lineTo(-8,-14); a.closePath(); a.fill();
+    a.fillStyle='#0d1116'; a.fillRect(-8,-2,16,3);    // ponte (visores)
+    a.fillStyle='rgba(150,190,220,.30)'; a.fillRect(-8,-2,16,1);
+    // painéis de radar AESA (4 faces) com leve glow
+    a.fillStyle='#10202a';
+    a.fillRect(-7,-13,5,5); a.fillRect(2,-13,5,5);
+    a.fillStyle='rgba(90,200,210,.30)';
+    a.fillRect(-7,-13,5,1.4); a.fillRect(2,-13,5,1.4);
+    // torre/mastro integrado
+    a.fillStyle='#3c4750';
+    a.beginPath(); a.moveTo(-4,-12); a.lineTo(4,-12);
+    a.lineTo(2,-30); a.lineTo(-2,-30); a.closePath(); a.fill();
+    a.fillStyle='#9aa6b5'; a.fillRect(-1,-40,2,12);
+    a.fillStyle='#ffce4a'; a.beginPath(); a.arc(0,-40,1.6,0,7); a.fill();
+    // chaminés anguladas gêmeas
+    a.fillStyle='#222a31';
+    a.beginPath(); a.moveTo(-7,-16); a.lineTo(-1,-16);
+    a.lineTo(-2,-26); a.lineTo(-6,-26); a.closePath(); a.fill();
+    a.beginPath(); a.moveTo(7,-16); a.lineTo(1,-16);
+    a.lineTo(2,-26); a.lineTo(6,-26); a.closePath(); a.fill();
+    a.fillStyle='#0e1216';
+    a.fillRect(-6,-26,4,2); a.fillRect(2,-26,4,2);
+    // helipad de popa com "H"
+    a.fillStyle='#20272e'; a.fillRect(-8,-46,16,12);
+    a.strokeStyle='rgba(230,235,240,.6)'; a.lineWidth=1.4;
+    a.beginPath();
+    a.moveTo(-3,-44); a.lineTo(-3,-37); a.moveTo(3,-44);
+    a.lineTo(3,-37); a.moveTo(-3,-40.5); a.lineTo(3,-40.5);
+    a.stroke();
+    // CIWS dome atrás da superestrutura
+    a.fillStyle='#4a5560'; a.beginPath(); a.arc(0,-20,4,0,7); a.fill();
+  }, h=>{
+    hBlob(h,0,0,12,52,205,55);                        // casco
+    h.fillStyle='#6a6a6a';
+    h.beginPath(); h.moveTo(-10,2); h.lineTo(10,2);
+    h.lineTo(8,-14); h.lineTo(-8,-14); h.closePath(); h.fill();
+    hBlob(h,0,-6,9,12,245,140);                       // superestrutura
+    hBlob(h,0,-30,2.5,10,255,150);                    // mastro (alto)
+    hBlob(h,-4,-21,3,5,225,110); hBlob(h,4,-21,3,5,225,110);
+  });
+
+  // ---- PORTA-AVIÕES (92x176; ref 86x168) ----
+  const carrierHull = bakeSprite(96,184, a=>{
+    const W2=44, H2=86;
+    // casco facetado (proa em lâmina +y)
+    let g=a.createLinearGradient(-W2,0,W2,0);
+    g.addColorStop(0,'#1b2126'); g.addColorStop(.5,'#3a444e');
+    g.addColorStop(1,'#1b2126'); a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(0,H2); a.lineTo(W2*0.7,H2*0.7); a.lineTo(W2,H2*0.3);
+    a.lineTo(W2,-H2+10); a.lineTo(W2*0.5,-H2);
+    a.lineTo(-W2*0.5,-H2); a.lineTo(-W2,-H2+10);
+    a.lineTo(-W2,H2*0.3); a.lineTo(-W2*0.7,H2*0.7);
+    a.closePath(); a.fill();
+    a.fillStyle='rgba(0,0,0,.40)'; a.fillRect(-W2,-H2,W2*2,4);
+    // convés de voo (non-skid escuro) + saliência a bombordo (deck angular)
+    g=a.createLinearGradient(0,-H2,0,H2);
+    g.addColorStop(0,'#2b3034'); g.addColorStop(.5,'#33393e');
+    g.addColorStop(1,'#262b2f'); a.fillStyle=g;
+    a.fillRect(-40,-80,80,158);
+    a.beginPath(); a.moveTo(-40,40); a.lineTo(-40,-70);
+    a.lineTo(-30,-70); a.lineTo(-12,46); a.closePath(); a.fill(); // angular
+    a.fillStyle='rgba(0,0,0,.18)';                     // listras de desgaste
+    for(let y=-72;y<74;y+=26) a.fillRect(-40,y,80,3);
+    // borda amarela do convés
+    a.strokeStyle='rgba(240,210,70,.55)'; a.lineWidth=2;
+    a.strokeRect(-39,-79,78,156);
+    // pista central tracejada + pista angular (branca)
+    a.strokeStyle='rgba(245,245,225,.85)'; a.lineWidth=3.4;
+    a.setLineDash([12,9]);
+    a.beginPath(); a.moveTo(2,-74); a.lineTo(2,72); a.stroke();
+    a.beginPath(); a.moveTo(-30,70); a.lineTo(30,-58); a.stroke();
+    a.setLineDash([]);
+    // catapultas na proa (2 trilhos) + defletores de jato
+    a.strokeStyle='rgba(210,215,220,.5)'; a.lineWidth=2;
+    a.beginPath(); a.moveTo(-6,30); a.lineTo(-6,76); a.stroke();
+    a.beginPath(); a.moveTo(8,34); a.lineTo(-20,74); a.stroke();
+    a.fillStyle='#1c2024'; a.fillRect(-12,28,12,4); a.fillRect(2,32,12,4);
+    // cabos de retenção (popa) + círculo de pouso
+    a.strokeStyle='rgba(230,232,235,.45)'; a.lineWidth=1.5;
+    for(let y=-66;y<-46;y+=6){ a.beginPath();
+      a.moveTo(-34,y); a.lineTo(34,y); a.stroke(); }
+    a.strokeStyle='rgba(240,210,70,.5)'; a.lineWidth=3;
+    a.beginPath(); a.arc(-2,-40,15,0,7); a.stroke();
+    // numeral de proa "07"
+    a.fillStyle='rgba(240,240,235,.8)';
+    a.fillRect(-9,58,4,14); a.fillRect(-9,58,9,4); a.fillRect(-9,65,9,4);
+    a.fillRect(2,58,9,4); a.fillRect(7,58,4,14); a.fillRect(2,65,9,4);
+    // 2 elevadores de convés (borda)
+    a.strokeStyle='rgba(0,0,0,.4)'; a.lineWidth=2;
+    a.strokeRect(33,-10,7,22); a.strokeRect(-40,16,8,20);
+    // ILHA (estibordo): bloco escalonado + radares + mastros
+    g=a.createLinearGradient(28,0,42,0);
+    g.addColorStop(0,'#7d8a96'); g.addColorStop(1,'#3a434d');
+    a.fillStyle=g; a.fillRect(28,-22,14,46);
+    a.fillStyle='#262d34'; a.fillRect(28,-22,14,4);
+    a.fillStyle='#0e1318'; a.fillRect(30,-14,10,5);    // ponte (visor)
+    a.fillStyle='rgba(150,190,220,.30)'; a.fillRect(30,-14,10,1.4);
+    a.fillStyle='#10202a'; a.fillRect(31,-26,8,4);     // AESA
+    a.fillStyle='rgba(90,200,210,.30)'; a.fillRect(31,-26,8,1.3);
+    a.fillStyle='#9aa6b5'; a.fillRect(34,-40,2.4,16);  // mastro
+    a.strokeStyle='#b8c4d2'; a.lineWidth=1.5;
+    a.beginPath(); a.moveTo(30,-34); a.lineTo(40,-34); a.stroke();
+    a.fillStyle='#1c2024'; a.fillRect(29,18,12,8);     // escape/funil integrado
+    a.fillStyle='#ffce4a'; a.beginPath(); a.arc(35,-40,1.6,0,7); a.fill();
+    // caças estacionados (asas dobradas) em pontos do convés
+    const jetPk=(jx,jy,rot)=>{ a.save(); a.translate(jx,jy); a.rotate(rot);
+      a.fillStyle='#aeb7c2';
+      a.beginPath(); a.moveTo(0,11); a.lineTo(3.2,0); a.lineTo(3.2,-9);
+      a.lineTo(-3.2,-9); a.lineTo(-3.2,0); a.closePath(); a.fill();
+      a.fillStyle='#8a94a0'; a.fillRect(-9,-3,18,4);   // asas dobradas
+      a.fillStyle='#7a838f'; a.fillRect(-3.2,-11,6.4,3);
+      a.restore(); };
+    jetPk(-22,-52,0.3); jetPk(-24,-30,0.25);
+    jetPk(-20,52,-0.2); jetPk(20,46,-0.15);
+  }, h=>{
+    const W2=44,H2=86;
+    hBlob(h,0,0,W2*0.95,H2*0.95,165,55);               // casco
+    h.fillStyle='#9a9a9a'; h.fillRect(-40,-80,80,158);  // convés plano
+    hBlob(h,35,1,8,24,250,140);                          // ilha (alta)
+  });
+
+  // ---- CHEFE GUNSHIP inimigo (190x190; nariz +y; ref W2=77 H2=61) ----
+  const bossHeli = bakeSprite(190,190, a=>{
+    const rW=77, rH=61;
+    // lança de cauda + estabilizador (-y, atrás)
+    let g=a.createLinearGradient(-7,0,7,0);
+    g.addColorStop(0,'#22281c'); g.addColorStop(.5,'#3c4632');
+    g.addColorStop(1,'#1b2016'); a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(-7,-rH+30); a.lineTo(7,-rH+30);
+    a.lineTo(4,-rH-30); a.lineTo(-4,-rH-30); a.closePath(); a.fill();
+    a.fillStyle='#2d352e'; a.fillRect(-22,-rH-26,44,9);
+    a.fillStyle='#b5302a'; a.fillRect(-22,-rH-26,44,2); // faixa de perigo
+    // asas curtas: pods de foguete + mísseis
+    [-1,1].forEach(s=>{
+      g=a.createLinearGradient(0,-6,0,24);
+      g.addColorStop(0,'#54603f'); g.addColorStop(1,'#2b3322');
+      a.fillStyle=g;
+      a.beginPath();
+      a.moveTo(s*16,-6); a.lineTo(s*(rW+4),4);
+      a.lineTo(s*(rW+4),24); a.lineTo(s*16,20); a.closePath(); a.fill();
+      a.fillStyle='#23271d';                       // pod de foguetes
+      a.fillRect(s*rW-9,4,22,18);
+      a.fillStyle='#0e0f0a';
+      for(let i=0;i<3;i++){ a.beginPath();
+        a.arc(s*rW-3+i*7,22,2.4,0,7); a.fill(); }
+      a.fillStyle='rgba(255,255,255,.10)'; a.fillRect(s*rW-9,4,22,2);
+      a.fillStyle='#9aa0a8';                        // míssil
+      a.fillRect(s*(rW*0.66)-3,4,6,26);
+      a.fillStyle='#d8362a'; a.beginPath();
+      a.moveTo(s*(rW*0.66)-3,30); a.lineTo(s*(rW*0.66),36);
+      a.lineTo(s*(rW*0.66)+3,30); a.closePath(); a.fill();
+    });
+    // fuselagem blindada (nariz +y)
+    g=a.createLinearGradient(-26,-rH,26,rH);
+    g.addColorStop(0,'#6f805a'); g.addColorStop(.45,'#465536');
+    g.addColorStop(1,'#222a1b'); a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(0,rH);
+    a.quadraticCurveTo(26,rH-10,24,rH*0.3);
+    a.lineTo(20,-rH+34);
+    a.quadraticCurveTo(16,-rH+10,7,-rH+30);
+    a.lineTo(-7,-rH+30);
+    a.quadraticCurveTo(-16,-rH+10,-20,-rH+34);
+    a.lineTo(-24,rH*0.3);
+    a.quadraticCurveTo(-26,rH-10,0,rH);
+    a.closePath(); a.fill();
+    // quilha sombreada + lombada clara
+    a.fillStyle='rgba(15,25,12,.40)';
+    a.beginPath(); a.moveTo(-20,rH*0.3); a.lineTo(20,rH*0.3);
+    a.lineTo(13,rH-6); a.lineTo(-13,rH-6); a.closePath(); a.fill();
+    a.fillStyle='rgba(190,210,150,.16)'; a.fillRect(-3,-rH+34,6,rH);
+    // painéis + rebites + faixa de perigo
+    a.strokeStyle='rgba(0,0,0,.32)'; a.lineWidth=2;
+    a.strokeRect(-15,-rH+34,30,(rH*2)-46);
+    a.fillStyle='#b5302a'; a.fillRect(-20,rH*0.3-2,40,3);
+    a.fillStyle='#0c0e09';
+    for(let ry=-rH+40;ry<rH-10;ry+=14){
+      a.beginPath(); a.arc(-17,ry,1.4,0,7); a.fill();
+      a.beginPath(); a.arc(17,ry,1.4,0,7); a.fill(); }
+    // canopies em tandem (artilheiro frente +y, piloto atrás)
+    const cano=(cy,rx,ry)=>{
+      a.fillStyle='#0e1b12';
+      a.beginPath(); a.ellipse(0,cy,rx,ry,0,0,7); a.fill();
+      const gg=a.createLinearGradient(0,cy-ry,0,cy+ry);
+      gg.addColorStop(0,'#d8ffe6'); gg.addColorStop(.5,'#6fae86');
+      gg.addColorStop(1,'#16331e'); a.fillStyle=gg;
+      a.beginPath(); a.ellipse(0,cy,rx-3,ry-3,0,0,7); a.fill();
+      a.fillStyle='rgba(255,255,255,.5)';
+      a.beginPath(); a.ellipse(-rx*0.3,cy-ry*0.4,rx*0.22,ry*0.3,0,0,7);
+      a.fill();
+    };
+    cano(rH*0.34,12,16); cano(-2,13,15);
+    // carcaça das turbinas (escape quente é FX vivo por cima)
+    g=a.createLinearGradient(0,-rH+30,0,-rH+46);
+    g.addColorStop(0,'#3a4230'); g.addColorStop(1,'#1c2116');
+    a.fillStyle=g; a.fillRect(-20,-rH+30,40,16);
+    a.fillStyle='#0e0f0a';
+    a.fillRect(-16,-rH+34,12,9); a.fillRect(4,-rH+34,12,9);
+  }, h=>{
+    const rW=77, rH=61;
+    h.fillStyle='#343a32';                          // boom baixo
+    h.beginPath(); h.moveTo(-7,-rH+30); h.lineTo(7,-rH+30);
+    h.lineTo(4,-rH-30); h.lineTo(-4,-rH-30); h.closePath(); h.fill();
+    [-1,1].forEach(s=>{ h.fillStyle='#5a5a5a';      // asas planas
+      h.beginPath(); h.moveTo(s*16,-6); h.lineTo(s*(rW+4),4);
+      h.lineTo(s*(rW+4),24); h.lineTo(s*16,20); h.closePath(); h.fill();
+      hBlob(h,s*rW+2,13,11,9,205,70); });           // pods
+    hBlob(h,0,rH*0.1,24,rH*0.96,235,55);            // espinha fuselagem
+    hBlob(h,0,rH*0.34,12,16,255,150);               // domo artilheiro
+    hBlob(h,0,-2,13,15,255,140);                    // domo piloto
+  });
+
+  // ---- CHEFE MBT: corpo (150x164; ref W2=64 H2=70, frente +y) ----
+  const bossTankBody = bakeSprite(150,164, a=>{
+    const W2=64, H2=70, trW=24, txc=W2-trW/2;
+    // bases das esteiras (links animados são FX vivo por cima)
+    [-1,1].forEach(s=>{
+      a.fillStyle='#15171b';
+      a.fillRect(s*txc-trW/2,-H2,trW,H2*2);
+      a.fillStyle='#0c0d10';
+      a.fillRect(s*txc-trW/2,-H2,trW,4);
+      a.fillRect(s*txc-trW/2,H2-4,trW,4);
+      // rodas de tração visíveis nas pontas
+      a.fillStyle='#2a2d33';
+      [-H2+12,H2-12].forEach(wy=>{ a.beginPath();
+        a.arc(s*txc,wy,9,0,7); a.fill();
+        a.fillStyle='#464a52'; a.beginPath();
+        a.arc(s*txc,wy,3.5,0,7); a.fill(); a.fillStyle='#2a2d33'; });
+    });
+    const hw = W2*2 - trW*2 + 6;
+    // saia lateral blindada cobrindo topo das esteiras
+    a.fillStyle='#3c4630';
+    a.fillRect(-hw/2-7,-H2+14,7,H2*2-28);
+    a.fillRect(hw/2,-H2+14,7,H2*2-28);
+    // casco facetado (glacis na frente +y)
+    let g=a.createLinearGradient(-hw/2,-H2,hw/2,H2);
+    g.addColorStop(0,'#7d8c58'); g.addColorStop(.5,'#566237');
+    g.addColorStop(1,'#333c22'); a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(-hw/2,-H2+12); a.lineTo(0,-H2);
+    a.lineTo(hw/2,-H2+12); a.lineTo(hw/2,H2-26);
+    a.lineTo(hw/2-16,H2); a.lineTo(-hw/2+16,H2);
+    a.lineTo(-hw/2,H2-26); a.closePath(); a.fill();
+    // glacis: chanfro claro + blocos de blindagem reativa (ERA)
+    a.fillStyle='rgba(220,230,180,.16)';
+    a.beginPath(); a.moveTo(-hw/2,H2-26); a.lineTo(hw/2,H2-26);
+    a.lineTo(hw/2-16,H2); a.lineTo(-hw/2+16,H2); a.closePath(); a.fill();
+    a.fillStyle='#2f3720';
+    for(let bx=-hw/2+14; bx<hw/2-14; bx+=18)
+      a.fillRect(bx,H2-22,14,9);                       // ERA frontal
+    a.fillStyle='rgba(0,0,0,.30)';
+    for(let bx=-hw/2+14; bx<hw/2-14; bx+=18)
+      a.fillRect(bx,H2-13,14,2);
+    // chevrons de perigo na proa
+    a.fillStyle='#caa92f';
+    a.fillRect(-hw/2+16,H2-12,hw-32,7);
+    a.fillStyle='#1d1f12';
+    for(let x=-hw/2+18; x<hw/2-16; x+=14) a.fillRect(x,H2-12,7,7);
+    // painéis/rebites no glacis
+    a.strokeStyle='rgba(0,0,0,.30)'; a.lineWidth=2;
+    a.strokeRect(-hw/2+8,-H2+18,hw-16,H2*2-52);
+    a.fillStyle='#1a1d12';
+    for(let yy=-H2+24; yy<H2-30; yy+=16){
+      a.beginPath(); a.arc(-hw/2+12,yy,1.6,0,7); a.fill();
+      a.beginPath(); a.arc(hw/2-12,yy,1.6,0,7); a.fill(); }
+    // caixas de estiva + jerricans nas laterais traseiras
+    a.fillStyle='#4a5436';
+    a.fillRect(-hw/2+6,-H2+18,16,22);
+    a.fillRect(hw/2-22,-H2+18,16,22);
+    a.fillStyle='rgba(0,0,0,.25)';
+    a.fillRect(-hw/2+6,-H2+28,16,2); a.fillRect(hw/2-22,-H2+28,16,2);
+    // convés do motor (grelhas) na traseira -y; escape é FX vivo
+    g=a.createLinearGradient(0,-H2,0,-H2+30);
+    g.addColorStop(0,'#1c2014'); g.addColorStop(1,'#333b22');
+    a.fillStyle=g; a.fillRect(-30,-H2+8,60,30);
+    a.strokeStyle='rgba(0,0,0,.45)'; a.lineWidth=2;
+    for(let yy=-H2+12; yy<-H2+34; yy+=4){ a.beginPath();
+      a.moveTo(-28,yy); a.lineTo(28,yy); a.stroke(); }
+  }, h=>{
+    const W2=64,H2=70,trW=24,txc=W2-trW/2;
+    [-1,1].forEach(s=>{ h.fillStyle='#3a3a3a';
+      h.fillRect(s*txc-trW/2,-H2,trW,H2*2); });        // esteiras baixas
+    const hw=W2*2-trW*2+6;
+    hBlob(h,0,2,hw*0.52,H2*0.94,225,90);               // casco abaulado
+    h.fillStyle='#d2d2d2';                             // glacis levemente alto
+    h.beginPath(); h.moveTo(-hw/2,H2-26); h.lineTo(hw/2,H2-26);
+    h.lineTo(hw/2-16,H2); h.lineTo(-hw/2+16,H2); h.closePath(); h.fill();
+  });
+
+  // ---- CHEFE MBT: torre + canhão duplo (140x90, pivô centro; cano +x) ----
+  const bossTankTurret = bakeSprite(140,96, a=>{
+    // bustle traseiro (cesto de estiva) atrás do eixo (-x)
+    a.fillStyle='#3a4327';
+    a.beginPath();
+    a.moveTo(-14,-26); a.lineTo(-40,-20); a.lineTo(-44,0);
+    a.lineTo(-40,20); a.lineTo(-14,26); a.closePath(); a.fill();
+    a.strokeStyle='rgba(0,0,0,.3)'; a.lineWidth=2;
+    a.strokeRect(-40,-18,26,36);
+    // canos duplos longos com manga térmica + freio de boca
+    [-7,1].forEach(oy=>{
+      let g=a.createLinearGradient(0,oy,0,oy+6);
+      g.addColorStop(0,'#5a6440'); g.addColorStop(1,'#23271b');
+      a.fillStyle=g; a.fillRect(10,oy,58,6);
+      a.fillStyle='#1a1d12'; a.fillRect(34,oy-1,10,8);  // manga térmica
+      a.fillStyle='#0e1009'; a.fillRect(64,oy-1.5,9,9); // freio de boca
+    });
+    // mantelete + torre facetada angular
+    let g=a.createLinearGradient(-26,-30,30,30);
+    g.addColorStop(0,'#90a064'); g.addColorStop(.5,'#5d6a3c');
+    g.addColorStop(1,'#333b22'); a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(34,-12); a.lineTo(34,12); a.lineTo(10,30);
+    a.lineTo(-22,26); a.lineTo(-30,0); a.lineTo(-22,-26);
+    a.lineTo(10,-30); a.closePath(); a.fill();
+    a.fillStyle='rgba(225,235,185,.16)';               // realce superior
+    a.beginPath(); a.moveTo(10,-30); a.lineTo(34,-12);
+    a.lineTo(20,-10); a.lineTo(2,-26); a.closePath(); a.fill();
+    // blocos ERA na face frontal da torre
+    a.fillStyle='#2c3420';
+    for(let i=-2;i<3;i++) a.fillRect(20,i*9-4,10,8);
+    // cúpula do comandante + metralhadora
+    g=a.createRadialGradient(-6,-6,2,-4,0,14);
+    g.addColorStop(0,'#7e8a58'); g.addColorStop(1,'#3a4225');
+    a.fillStyle=g; a.beginPath(); a.arc(-4,0,13,0,7); a.fill();
+    a.fillStyle='#2a3019'; a.beginPath(); a.arc(-4,0,6,0,7); a.fill();
+    a.fillStyle='#15170e'; a.fillRect(-4,-2.5,22,5);   // MG da cúpula
+    // lançadores de fumaça nas laterais
+    a.fillStyle='#1c1f12';
+    for(let i=0;i<3;i++){ a.fillRect(0,-26+i*3,7,2.4);
+      a.fillRect(0,18+i*3,7,2.4); }
+    // antena
+    a.strokeStyle='#9aa06f'; a.lineWidth=1.5;
+    a.beginPath(); a.moveTo(-18,-20); a.lineTo(-26,-34); a.stroke();
+  }, h=>{
+    h.fillStyle='#8a8a8a'; h.fillRect(10,-7,60,6);
+    h.fillRect(10,1,60,6);                              // canos
+    hBlob(h,0,0,30,28,245,110);                         // massa da torre
+    hBlob(h,-4,0,13,13,255,140);                        // cúpula
+  });
+
+  // ---- CHEFE ENCOURAÇADO: casco (132x186; ref W2=60 H2=85, proa +y) ----
+  const bossShipHull = bakeSprite(132,186, a=>{
+    const W2=60, H2=85;
+    // ---- casco facetado com cinta de blindagem ----
+    let g=a.createLinearGradient(-W2,0,W2,0);
+    g.addColorStop(0,'#1c2630'); g.addColorStop(.5,'#43525f');
+    g.addColorStop(1,'#1c2630'); a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(0,H2); a.lineTo(W2*0.58,H2*0.6);
+    a.lineTo(W2,H2*0.16); a.lineTo(W2,-H2+16);
+    a.lineTo(W2*0.5,-H2); a.lineTo(-W2*0.5,-H2);
+    a.lineTo(-W2,-H2+16); a.lineTo(-W2,H2*0.16);
+    a.lineTo(-W2*0.58,H2*0.6); a.closePath(); a.fill();
+    a.fillStyle='rgba(0,0,0,.42)'; a.fillRect(-W2,-H2,W2*2,4);
+    a.fillStyle='rgba(255,255,255,.10)';
+    a.beginPath(); a.moveTo(0,H2); a.lineTo(9,H2*0.7);
+    a.lineTo(-9,H2*0.7); a.closePath(); a.fill();
+    // cinta de blindagem rebitada nas amuradas
+    a.fillStyle='#161d24';
+    a.fillRect(-W2,H2*0.16-3,W2*2,4);
+    a.fillStyle='#0c1116';
+    for(let xx=-W2+8; xx<W2-6; xx+=12){
+      a.beginPath(); a.arc(xx,H2*0.16-1,1.3,0,7); a.fill(); }
+    // ---- convés de madeira (tabuado) ----
+    g=a.createLinearGradient(0,-H2,0,H2);
+    g.addColorStop(0,'#7a6a44'); g.addColorStop(.5,'#9c8a58');
+    g.addColorStop(1,'#6e5f3c'); a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(0,H2-6); a.lineTo(W2-10,H2*0.5); a.lineTo(W2-10,-H2+18);
+    a.lineTo(-W2+10,-H2+18); a.lineTo(-W2+10,H2*0.5);
+    a.closePath(); a.fill();
+    a.strokeStyle='rgba(60,48,28,.40)'; a.lineWidth=1;
+    for(let xx=-W2+14; xx<W2-12; xx+=7){ a.beginPath();
+      a.moveTo(xx,-H2+18); a.lineTo(xx,H2*0.55); a.stroke(); }
+    // passadiços/catwalk de aço nas bordas do convés
+    a.fillStyle='#39434e';
+    a.fillRect(-W2+8,-H2+18,5,H2*2-30); a.fillRect(W2-13,-H2+18,5,H2*2-30);
+    // ---- barbetas (bases das 3 torres principais) ----
+    [H2*0.56, 0, -H2*0.5].forEach(by=>{
+      g=a.createRadialGradient(-3,by-3,2,0,by,17);
+      g.addColorStop(0,'#5c6672'); g.addColorStop(1,'#262d35');
+      a.fillStyle=g; a.beginPath(); a.arc(0,by,16,0,7); a.fill();
+      a.strokeStyle='rgba(0,0,0,.35)'; a.lineWidth=2;
+      a.beginPath(); a.arc(0,by,16,0,7); a.stroke();
+    });
+    // ---- superestrutura pagode escalonada ----
+    const tier=(yy,wd,hh,c1,c2)=>{
+      const gg=a.createLinearGradient(-wd,0,wd,0);
+      gg.addColorStop(0,c2); gg.addColorStop(.5,c1); gg.addColorStop(1,c2);
+      a.fillStyle=gg; a.fillRect(-wd,yy-hh,wd*2,hh*2);
+      a.fillStyle='rgba(255,255,255,.12)'; a.fillRect(-wd,yy-hh,wd*2,2.5);
+      a.fillStyle='rgba(0,0,0,.30)'; a.fillRect(-wd,yy+hh-2.5,wd*2,2.5);
+    };
+    tier(2,21,28,'#566472','#2c3540');
+    tier(-4,16,17,'#627280','#333d49');
+    tier(-9,11,9,'#6f7e8c','#3a444f');
+    a.fillStyle='#0d141a';                               // ponte (visor)
+    a.fillRect(-13,-6,26,4);
+    a.fillStyle='rgba(150,195,225,.32)'; a.fillRect(-13,-6,26,1.3);
+    // diretor de tiro principal + telêmetro
+    a.fillStyle='#46525f'; a.beginPath(); a.arc(0,-12,6,0,7); a.fill();
+    a.fillStyle='#283039'; a.fillRect(-9,-13,18,2.5);
+    // mastro torre + radar dish + AESA + antenas
+    a.strokeStyle='#7c8a98'; a.lineWidth=2.4;
+    a.beginPath(); a.moveTo(-6,-18); a.lineTo(0,-46);
+    a.lineTo(6,-18); a.moveTo(0,-46); a.lineTo(0,-58); a.stroke();
+    a.fillStyle='#cfe0ea';
+    a.beginPath(); a.ellipse(0,-40,8,4,0,0,7); a.fill();   // radar dish
+    a.fillStyle='#10202a'; a.fillRect(-6,-52,12,4);        // AESA topo
+    a.fillStyle='rgba(90,200,210,.30)'; a.fillRect(-6,-52,12,1.3);
+    a.fillStyle='#ffce4a'; a.beginPath(); a.arc(0,-58,1.8,0,7); a.fill();
+    // 2 chaminés encouraçadas com tampa (fumaça = FX vivo)
+    a.fillStyle='#222a31';
+    a.fillRect(-10,-30,13,15); a.fillRect(-3,-3,13,15);
+    a.fillStyle='#0e1216';
+    a.fillRect(-10,-30,13,3); a.fillRect(-3,-3,13,3);
+    a.fillStyle='rgba(255,255,255,.08)';
+    a.fillRect(-10,-30,13,1.5); a.fillRect(-3,-3,13,1.5);
+    // ---- galerias de AA secundária ao longo das amuradas ----
+    for(let yy=-H2+34; yy<H2-34; yy+=18){
+      [-1,1].forEach(s=>{
+        a.fillStyle='#2b333c';
+        a.beginPath(); a.arc(s*(W2-13),yy,4.5,0,7); a.fill();
+        a.fillStyle='#10151a';
+        a.fillRect(s*(W2-13)+(s<0?-9:2),yy-1.4,9,2.8);   // canos AA
+        a.fillStyle='rgba(255,255,255,.10)';
+        a.beginPath(); a.arc(s*(W2-13)-2,yy-2,1.6,0,7); a.fill();
+      });
+    }
+    // âncora + escovém na proa, faixa de perigo e numeral
+    a.fillStyle='#15191e';
+    a.fillRect(-2,H2*0.66,4,10);
+    a.beginPath(); a.arc(0,H2*0.62,3,0,7); a.fill();
+    a.fillStyle='#b5302a'; a.fillRect(-W2+10,H2*0.16,W2*2-20,3);
+    a.fillStyle='#d4dde4';
+    a.fillRect(-4,H2*0.78,2,7); a.fillRect(0,H2*0.78,2,7);
+    a.fillRect(4,H2*0.78,2,7);
+  }, h=>{
+    const W2=60,H2=85;
+    hBlob(h,0,2,W2*0.92,H2*0.95,205,50);               // casco
+    h.fillStyle='#b0b0b0';                              // convés
+    h.beginPath(); h.moveTo(0,H2-6); h.lineTo(W2-10,H2*0.5);
+    h.lineTo(W2-10,-H2+18); h.lineTo(-W2+10,-H2+18);
+    h.lineTo(-W2+10,H2*0.5); h.closePath(); h.fill();
+    [H2*0.56,0,-H2*0.5].forEach(by=>hBlob(h,0,by,16,16,235,120));
+    hBlob(h,0,-2,22,30,250,150);                         // pagode (bem alto)
+    hBlob(h,0,-44,3,16,255,150);                         // mastro
+    hBlob(h,-3,-22,6,8,225,110); hBlob(h,3,4,6,8,225,110);
+  });
+
+  // ---- CHEFE: torre de bateria principal tripla (76x44, pivô centro) ----
+  const bossShipTurret = bakeSprite(76,44, a=>{
+    [-7,0,7].forEach(oy=>{
+      let g=a.createLinearGradient(0,oy-2.5,0,oy+2.5);
+      g.addColorStop(0,'#5a6470');
+      g.addColorStop(1,'#1c232b'); a.fillStyle=g;
+      a.fillRect(8,oy-2.5,30,5);
+      a.fillStyle='#10151a'; a.fillRect(36,oy-3,4,6);
+    });
+    let g=a.createLinearGradient(-14,-14,16,16);
+    g.addColorStop(0,'#8493a2'); g.addColorStop(.5,'#4d5a68');
+    g.addColorStop(1,'#232c35'); a.fillStyle=g;
+    a.beginPath();
+    a.moveTo(10,-15); a.lineTo(16,0); a.lineTo(10,15);
+    a.lineTo(-16,13); a.lineTo(-20,0); a.lineTo(-16,-13);
+    a.closePath(); a.fill();
+    a.fillStyle='rgba(255,255,255,.14)';
+    a.beginPath(); a.moveTo(10,-15); a.lineTo(16,0);
+    a.lineTo(8,-2); a.lineTo(4,-13); a.closePath(); a.fill();
+    a.fillStyle='#10151a'; a.beginPath(); a.arc(-4,0,3.4,0,7); a.fill();
+  }, h=>{
+    h.fillStyle='#8a8a8a'; h.fillRect(8,-9,30,18);
+    hBlob(h,-2,0,17,14,245,120);
+  });
+
   SPR = { heli, tank, turret, tree,
-          trainCar, trainLoco, trainGun, jet };
+          trainCar, trainLoco, trainGun, jet,
+          bunker, bunkerGun, navGun,
+          shipHull, shipGun, boatHull, warHull, carrierHull, bossHeli,
+          bossTankBody, bossTankTurret,
+          bossShipHull, bossShipTurret,
+          waterN: bakeWaterNormal(128),
+          waterSpeckle: bakeWaterSpeckle(192, 17),
+          waterSpeckle2: bakeWaterSpeckle(192, 113),
+          waterSpeckle3: bakeWaterSpeckle(192, 251) };
 }
 // blit albedo no cv e o normal correspondente no cvN (mesmo transform)
 function stamp(spr, x, y, rot, scl){
@@ -1471,21 +2370,21 @@ function drawTree(x, y, s) {
   if (SPR) stamp(SPR.tree, x, y, 0, s/24);
 }
 
-function riverPath(pad = 0) {
+function riverPath(pad = 0, g = ctx) {
   // amostragem fina + ponta arredondada (sem pinça/bico) => sem piscar
   const STEP = 4;
-  ctx.beginPath();
+  g.beginPath();
   let first = true;
   for (let y = -48; y <= H+48; y += STEP) {
     const hw = riverHWAt(y); if (hw <= 0) continue;
     const x = riverCX(y) - (hw + pad);
-    first ? (ctx.moveTo(x, y), first = false) : ctx.lineTo(x, y);
+    first ? (g.moveTo(x, y), first = false) : g.lineTo(x, y);
   }
   for (let y = H+48; y >= -48; y -= STEP) {
     const hw = riverHWAt(y); if (hw <= 0) continue;
-    ctx.lineTo(riverCX(y) + (hw + pad), y);
+    g.lineTo(riverCX(y) + (hw + pad), y);
   }
-  ctx.closePath();
+  g.closePath();
 }
 const BIOME_PAL = {
   forest: { g:['#1f6b38','#2c8048','#185a30'], acc:'rgba(150,210,110,.22)',
@@ -1500,53 +2399,75 @@ const BIOME_PAL = {
             name:'OCEANO' },
 };
 // pathFn: traça o contorno da água | cxFn(y): centro | hwFn(y): meia-largura
+let _waterPat=null, _specklePat=null, _specklePat2=null, _specklePat3=null;
 function drawWaterBody(pathFn, cxFn, hwFn) {
-  ctx.save(); pathFn(); ctx.clip();
-  // fundo com profundidade (mais escuro nas margens)
+  // ---- ALBEDO da água (cor + profundidade + cristas) ----
+  ctx.save(); pathFn(ctx); ctx.clip();
+  // água azul natural (margens fundas -> canal um pouco mais claro)
   const cm = cxFn(H/2), hm = Math.max(40, hwFn(H/2));
   const wg = ctx.createLinearGradient(cm-hm,0,cm+hm,0);
-  wg.addColorStop(0,'#1d4f72'); wg.addColorStop(.5,'#3a86b0');
-  wg.addColorStop(1,'#1d4f72');
+  wg.addColorStop(0,'#123a63');
+  wg.addColorStop(.16,'#1a4f7e');
+  wg.addColorStop(.5,'#2467a0');                      // canal central (azul)
+  wg.addColorStop(.84,'#1a4f7e');
+  wg.addColorStop(1,'#123a63');
   ctx.fillStyle = wg; ctx.fillRect(0,0,W,H);
 
-  // ondas: fileiras que rolam (acompanham o leito) com 2 frequências
-  for (let y = -16; y < H+16; y += 11) {
-    const cx = cxFn(y), hw = hwFn(y);
-    if (hw < 6) continue;
-    const t = y*0.11 - frame*0.10;
-    const amp = 2.4 + Math.sin(y*0.03 + frame*0.05)*1.2;
-    ctx.lineWidth = 2;
-    // crista clara
-    ctx.strokeStyle = 'rgba(225,245,255,.28)';
-    ctx.beginPath();
-    for (let x = cx-hw+4; x <= cx+hw-4; x += 10) {
-      const yy = y + Math.sin(t + x*0.07)*amp;
-      x === cx-hw+4 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy);
-    }
-    ctx.stroke();
-    // sombra logo abaixo da crista (dá volume)
-    ctx.strokeStyle = 'rgba(10,45,75,.35)';
-    ctx.beginPath();
-    for (let x = cx-hw+4; x <= cx+hw-4; x += 10) {
-      const yy = y + 3 + Math.sin(t + x*0.07)*amp;
-      x === cx-hw+4 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy);
-    }
-    ctx.stroke();
+  // variação de profundidade ORGÂNICA: manchas grandes e MUITO suaves
+  // ancoradas no mundo (sem linhas, sem piscar) — o relevo real vem das
+  // normais animadas (shader). Aqui é só leve mottle de cor.
+  for (let i = 0; i < 7; i++) {
+    const wY = (i*230) % 1400;
+    const sy = wY + scrollY;                          // -> tela
+    if (sy < -120 || sy > H+120) continue;
+    const cx = cxFn(sy), hw = hwFn(sy);
+    if (hw < 8) continue;
+    const bx = cx + Math.sin(i*2.3)*hw*0.5;
+    const r = hw*0.9;
+    const gb = ctx.createRadialGradient(bx,sy,0,bx,sy,r);
+    const dark = i % 2 === 0;
+    gb.addColorStop(0, dark ? 'rgba(8,26,46,.16)' : 'rgba(120,165,200,.10)');
+    gb.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = gb;
+    ctx.beginPath(); ctx.ellipse(bx,sy,r,r*1.5,0,0,7); ctx.fill();
   }
-  // brilho central da correnteza
-  ctx.globalCompositeOperation = 'lighter';
-  for (let y = -10; y < H+10; y += 26) {
-    const cx = cxFn(y), hw = hwFn(y);
-    if (hw < 10) continue;
-    const gx = cx + Math.sin(y*0.02 + frame*0.04)*hw*0.3;
-    const g = ctx.createRadialGradient(gx,y,0,gx,y,hw*0.7);
-    g.addColorStop(0,'rgba(255,255,255,.10)');
-    g.addColorStop(1,'rgba(255,255,255,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(cx-hw, y-14, hw*2, 28);
+
+  // ---- SPECKLE: campo denso de micro-flecos (a "cara de água do alto").
+  // Ancorado ao scroll do mundo (rola junto, não pisca); 2 escalas. ----
+  if (SPR && SPR.waterSpeckle) {
+    if (!_specklePat){ _specklePat=ctx.createPattern(SPR.waterSpeckle,'repeat');
+      _specklePat2=ctx.createPattern(SPR.waterSpeckle2,'repeat');
+      _specklePat3=ctx.createPattern(SPR.waterSpeckle3,'repeat'); }
+    const T=192, oy=((scrollY)%T+T)%T;
+    // 3 campos parados, pesos em senos de freq/fase distintas: a mistura
+    // nunca é uniforme -> umas regiões trocam, outras ficam (assíncrono)
+    let a=0.5+0.5*Math.sin(frame*0.031),
+        b=0.5+0.5*Math.sin(frame*0.043+2.1),
+        d=0.5+0.5*Math.sin(frame*0.022+4.2);
+    const nz=a+b+d; a/=nz; b/=nz; d/=nz;
+    ctx.save(); ctx.translate(0,oy);
+    ctx.globalAlpha=a; ctx.fillStyle=_specklePat;
+    ctx.fillRect(-T,-oy-T,W+T*2,H+T*2);
+    ctx.globalAlpha=b; ctx.fillStyle=_specklePat2;
+    ctx.fillRect(-T,-oy-T,W+T*2,H+T*2);
+    ctx.globalAlpha=d; ctx.fillStyle=_specklePat3;
+    ctx.fillRect(-T,-oy-T,W+T*2,H+T*2);
+    ctx.restore();
   }
-  ctx.globalCompositeOperation = 'source-over';
+  // espuma fina e ESTÁVEL nas margens (ancorada no mundo, sem piscar)
+  for (let y = -6; y < H+6; y += 5) {
+    const cx = cxFn(y), hw = hwFn(y);
+    if (hw < 8) continue;
+    const wY = y - scrollY;
+    ctx.fillStyle = `rgba(205,225,238,${0.10+0.05*Math.sin(wY*0.12)})`;
+    ctx.fillRect(cx-hw-1, y, 3, 5);
+    ctx.fillRect(cx+hw-2, y, 3, 5);
+  }
   ctx.restore();
+
+  // água fica com NORMAL PLANO de propósito: o brilho direcional do sol
+  // sobre normais senoidais é que criava as "linhas". A textura é toda
+  // carregada pelo speckle do albedo (como na referência, luz plana).
 }
 
 // --- decorações por bioma ---
@@ -1619,6 +2540,24 @@ function drawOceanSwell() {
   ctx.save();
   const sc = scrollY;                                  // rola com o mundo
 
+  // 0) variação tonal ORGÂNICA em blobs grandes e suaves (substitui a
+  // antiga cor por célula -> acaba a grade de quadrados no oceano)
+  for (let i = 0; i < 9; i++) {
+    const px = W*(0.5 + 0.42*Math.sin(i*2.3 + 1.1))
+             + Math.sin(sc*0.003 + i)*30;
+    const span = H + 360;
+    let py = ((i*173.7 - sc*0.55) % span + span) % span - 180;
+    const r = 150 + (i % 4)*55;
+    const dark = i % 2 === 0;
+    const gg = ctx.createRadialGradient(px,py,0,px,py,r);
+    gg.addColorStop(0, dark ? 'rgba(10,34,55,.22)'
+                            : 'rgba(70,135,160,.16)');
+    gg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = gg;
+    ctx.save(); ctx.translate(px,py); ctx.scale(1, 0.7);
+    ctx.beginPath(); ctx.arc(0,0,r,0,7); ctx.fill(); ctx.restore();
+  }
+
   // 1) grandes manchas de reflexo (sheen) que sobem devagar
   ctx.globalCompositeOperation = 'lighter';
   for (let i = 0; i < 7; i++) {
@@ -1636,43 +2575,28 @@ function drawOceanSwell() {
   }
   ctx.globalCompositeOperation = 'source-over';
 
-  // 2) marulho: cristas onduladas (2 frequências cruzadas, não paralelas)
-  for (let y = -24; y < H + 24; y += 18) {
-    const wy = y + sc * 0.6;                            // fase ligada ao mundo
-    const a1 = 4 + Math.sin(wy * 0.03) * 2.2;
-    ctx.lineWidth = 2.2;
-    ctx.strokeStyle = 'rgba(205,236,252,0.13)';
-    ctx.beginPath();
-    for (let x = -20; x <= W + 20; x += 16) {
-      const yy = y
-        + Math.sin(wy * 0.05 + x * 0.045) * a1
-        + Math.sin(x * 0.017 - sc * 0.012) * 5;
-      x === -20 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy);
-    }
-    ctx.stroke();
-    ctx.strokeStyle = 'rgba(8,32,58,0.20)';             // sombra do vale
-    ctx.beginPath();
-    for (let x = -20; x <= W + 20; x += 16) {
-      const yy = y + 5
-        + Math.sin(wy * 0.05 + x * 0.045) * a1
-        + Math.sin(x * 0.017 - sc * 0.012) * 5;
-      x === -20 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy);
-    }
-    ctx.stroke();
+  // 2) SPECKLE: campo denso de micro-flecos (a "cara de mar do alto"),
+  // ancorado ao scroll do mundo (rola junto, não pisca) — 2 escalas.
+  // Substitui as antigas cristas em linha que pareciam fake.
+  if (SPR && SPR.waterSpeckle) {
+    if (!_specklePat){ _specklePat=ctx.createPattern(SPR.waterSpeckle,'repeat');
+      _specklePat2=ctx.createPattern(SPR.waterSpeckle2,'repeat');
+      _specklePat3=ctx.createPattern(SPR.waterSpeckle3,'repeat'); }
+    const T=192, oy=((sc)%T+T)%T;
+    // 3 campos parados, pesos assíncronos -> cintilar irregular no lugar
+    let a=0.5+0.5*Math.sin(frame*0.028),
+        b=0.5+0.5*Math.sin(frame*0.039+2.1),
+        d=0.5+0.5*Math.sin(frame*0.020+4.2);
+    const nz=a+b+d; a/=nz; b/=nz; d/=nz;
+    ctx.save(); ctx.translate(0,oy);
+    ctx.globalAlpha=a; ctx.fillStyle=_specklePat;
+    ctx.fillRect(-T,-oy-T,W+T*2,H+T*2);
+    ctx.globalAlpha=b; ctx.fillStyle=_specklePat2;
+    ctx.fillRect(-T,-oy-T,W+T*2,H+T*2);
+    ctx.globalAlpha=d; ctx.fillStyle=_specklePat3;
+    ctx.fillRect(-T,-oy-T,W+T*2,H+T*2);
+    ctx.restore();
   }
-
-  // 3) flocos de espuma cintilando
-  ctx.globalCompositeOperation = 'lighter';
-  for (let i = 0; i < 40; i++) {
-    const fx = (i * 89.7) % W;
-    let fy = ((i * 47.13 - sc * 0.8) % (H + 30) + (H + 30)) % (H + 30) - 15;
-    const tw = 0.35 + 0.65 * Math.abs(Math.sin(i * 1.7 + frame * 0.06));
-    ctx.fillStyle = `rgba(225,245,255,${0.18 * tw})`;
-    ctx.beginPath();
-    ctx.ellipse(fx, fy, 2.4, 1.3, 0, 0, 7);
-    ctx.fill();
-  }
-  ctx.globalCompositeOperation = 'source-over';
   ctx.restore();
 }
 
@@ -1757,10 +2681,9 @@ function drawTerrain() {
       const n  = vnoise(wx/150, wy/150);
       const n2 = vnoise(wx/60 + 21, wy/60 + 8);
       if (b === 'ocean') {
-        const yy = sy + C/2;
-        const d = 0.5 + 0.5*Math.sin(yy*0.010) + 0.18*Math.sin(sx*0.018+yy*0.02);
-        const r = 22 + d*14, g = 70 + d*36, bl = 110 + d*42;
-        ctx.fillStyle = `rgb(${r|0},${g|0},${bl|0})`;
+        // cor de base UNIFORME (sem grade de células); a variação
+        // tonal vem em blobs suaves no drawOceanSwell
+        ctx.fillStyle = '#1b4f73';
       } else {
         ctx.fillStyle = n < .42 ? pal.g[0] : (n < .74 ? pal.g[1] : pal.g[2]);
       }
@@ -1808,14 +2731,13 @@ function drawTerrain() {
   // ---- lagos (biomas de cidade) ----
   cityLakes().forEach(l => {
     ctx.fillStyle = '#6a6f74';                    // margem de concreto
-    ctx.beginPath(); ctx.ellipse(l.x,l.y,l.rx+8,l.ry+8,0,0,7); ctx.fill();
-    const lp = () => { ctx.beginPath();
-      ctx.ellipse(l.x,l.y,l.rx,l.ry,0,0,7); ctx.closePath(); };
+    lakePath(l, ctx, 9); ctx.fill();
+    const lp  = (g=ctx) => lakePath(l, g, 0);
     const lhw = y => { const d=1-((y-l.y)/l.ry)**2;
-      return d>0 ? l.rx*Math.sqrt(d) : 0; };
+      return d>0 ? l.rx*Math.sqrt(d)*0.92 : 0; };
     drawWaterBody(lp, () => l.x, lhw);
     ctx.strokeStyle='rgba(220,240,255,.3)'; ctx.lineWidth=2;
-    ctx.beginPath(); ctx.ellipse(l.x,l.y,l.rx,l.ry,0,0,7); ctx.stroke();
+    lakePath(l, ctx, 0); ctx.stroke();
   });
 
   // ---- rio (quando o segmento tem rio) ----
@@ -1824,7 +2746,7 @@ function drawTerrain() {
   if (hasRiver) {
     ctx.fillStyle = '#c9b274';                    // bancos de areia
     riverPath(9); ctx.fill();
-    drawWaterBody(() => riverPath(0), riverCX, riverHWAt);
+    drawWaterBody(g => riverPath(0, g), riverCX, riverHWAt);
     // contorno ESTÁVEL (sem animação) seguindo o mesmo traçado do rio
     ctx.lineWidth = 3; ctx.lineJoin = 'round';
     ctx.strokeStyle = 'rgba(220,240,255,.32)';
@@ -1854,11 +2776,71 @@ function drawTerrain() {
     if (roadY < -40 || roadY > H) return;
     if (biomeOf(segOf(roadY)) === 'ocean') return;   // sem estrada no mar
     roads.push(roadY);
-    ctx.fillStyle = '#4d4641'; ctx.fillRect(0, roadY, W, 30);
-    ctx.fillStyle = '#3b3531';
-    ctx.fillRect(0, roadY, W, 4); ctx.fillRect(0, roadY+26, W, 4);
-    ctx.fillStyle = '#f2f2f2';                       // faixa BRANCA
-    for (let x = 0; x < W; x += 44) ctx.fillRect(x+10, roadY+13, 22, 4);
+    // ~40% das vias são de TERRA (sem pavimento); cor segue o bioma
+    const dirt = bhash(o.n, 31.7) < 0.42;
+    if (dirt) {
+      const b = biomeOf(segOf(roadY + ROADW/2));
+      const col = b === 'desert' ? ['#caa066','#b1894e','#937036']
+                : b === 'ice'    ? ['#c6d0d4','#aab7bd','#8c9aa1']
+                : b === 'city'   ? ['#85817a','#6e6b64','#54514c']
+                :                  ['#7c6040','#664c2f','#4f3a23']; // floresta
+      // bordas IRREGULARES + DESNÍVEL geral (entra de um lado e sai mais
+      // acima/abaixo do outro); tudo determinístico em x e o.n -> não pisca
+      const k = o.n*1.7;
+      const sl = (hash(o.n, 5.3) - 0.5) * 0.26;       // rampa (~±60px em W)
+      const ramp = x => sl * (x - W/2);
+      const eTop = x => roadY + ramp(x) + Math.sin(x*0.055+k)*3
+        + Math.sin(x*0.017+k*1.9)*2.2 + 1.5;
+      const eBot = x => roadY+ROADW + ramp(x) + Math.sin(x*0.048+k*2.3)*3
+        + Math.sin(x*0.021+k*0.6)*2.2 - 1.5;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(0, eTop(0));
+      for (let x=0; x<=W; x+=10) ctx.lineTo(x, eTop(x));
+      for (let x=W; x>=0; x-=10) ctx.lineTo(x, eBot(x));
+      ctx.closePath(); ctx.clip();
+      ctx.fillStyle = col[0]; ctx.fillRect(0, roadY-8, W, ROADW+16);
+      // acostamento acompanhando a borda ondulada
+      ctx.strokeStyle = col[2]; ctx.lineWidth = 7;
+      ctx.beginPath();
+      for (let x=0; x<=W; x+=10)
+        (x?ctx.lineTo:ctx.moveTo).call(ctx, x, eTop(x));
+      ctx.stroke();
+      ctx.beginPath();
+      for (let x=0; x<=W; x+=10)
+        (x?ctx.lineTo:ctx.moveTo).call(ctx, x, eBot(x));
+      ctx.stroke();
+      // 2 sulcos de roda SERPENTEANDO
+      ctx.strokeStyle = col[1]; ctx.lineWidth = 6;
+      [0.34, 0.64].forEach((fr,i) => {
+        ctx.beginPath();
+        for (let x=0; x<=W; x+=10) {
+          const yy = roadY + ROADW*fr + ramp(x) + Math.sin(x*0.05+k+i*2)*3.2
+            + Math.sin(x*0.013+k)*2;
+          (x?ctx.lineTo:ctx.moveTo).call(ctx, x, yy);
+        }
+        ctx.stroke();
+      });
+      // manchas/pedriscos determinísticos (terra batida)
+      for (let i=0; i<26; i++) {
+        const hx = hash(o.n*3+i, i*2.1), hy = hash(i*1.7, o.n+i);
+        const x = hx*W, y = roadY+5 + hy*(ROADW-10) + ramp(x);
+        ctx.fillStyle = (i%3? 'rgba(0,0,0,.10)' : 'rgba(255,255,255,.06)');
+        ctx.beginPath();
+        ctx.ellipse(x, y, 2+hx*4, 1.5+hy*2.5, 0, 0, 7); ctx.fill();
+      }
+      ctx.restore();
+    } else {
+      ctx.fillStyle = '#3a3b40'; ctx.fillRect(0, roadY, W, ROADW); // asfalto
+      ctx.fillStyle = '#2b2c30';                     // acostamento
+      ctx.fillRect(0, roadY, W, 5);
+      ctx.fillRect(0, roadY+ROADW-5, W, 5);
+      ctx.fillStyle = 'rgba(255,255,255,.05)';       // brilho do asfalto
+      ctx.fillRect(0, roadY+7, W, 2);
+      ctx.fillStyle = '#e9e3c6';                     // faixa central tracejada
+      for (let x = 0; x < W; x += 48)
+        ctx.fillRect(x+14, roadY+ROADW/2-2, 26, 4);
+    }
   });
   gRails = rails; gRoads = roads;
 
@@ -2086,212 +3068,137 @@ function drawEnemy(e) {
       nx.restore();
     }
   } else if (e.t === 'ship') {
-    // ---- canhoneira: proa segue o curso do rio ----
+    // ---- canhoneira HD: proa segue o rio + torre giratória ----
     const rang = Math.atan2(
       riverCX(e.y-22) - riverCX(e.y+22), 44);   // tangente do rio
-    ctx.save();
-    ctx.rotate(rang);
-    // espuma/esteira atrás
-    ctx.fillStyle = 'rgba(220,240,255,.30)';
-    ctx.beginPath();
-    ctx.moveTo(-8, -h/2); ctx.quadraticCurveTo(0, -h/2-12, 8, -h/2);
-    ctx.fill();
-    // casco
-    const hgr = ctx.createLinearGradient(-w/2,0,w/2,0);
-    hgr.addColorStop(0,'#3c4654'); hgr.addColorStop(.5,'#5a6678');
-    hgr.addColorStop(1,'#333c48');
-    ctx.fillStyle = hgr;
-    ctx.beginPath();
-    ctx.moveTo(0, h/2);                       // proa em bico
-    ctx.lineTo(w/2, h/6);
-    ctx.lineTo(w/2-2, -h/2+6);
-    ctx.quadraticCurveTo(0,-h/2-2,-w/2+2,-h/2+6);
-    ctx.lineTo(-w/2, h/6);
-    ctx.closePath(); ctx.fill();
-    // convés
-    ctx.fillStyle = '#2c3340';
-    ctx.fillRect(-w/2+6, -h/4, w-12, h*0.55);
-    // superestrutura / ponte de comando
-    ctx.fillStyle = '#788499';
-    ctx.fillRect(-9, -8, 18, 18);
-    ctx.fillStyle = '#cfe6f5';
-    ctx.fillRect(-6, -5, 12, 6);
-    ctx.fillStyle = '#9aa6b5';
-    ctx.fillRect(-2, -18, 4, 10);             // mastro
-    ctx.restore();
-    // torre de canhão giratória mirando o jogador (independe do rio)
-    const sa = Math.atan2(player.y - e.y, player.x - e.x);
-    ctx.save();
-    ctx.rotate(sa);
-    ctx.fillStyle = '#20252e';
-    ctx.fillRect(0, -3, 22, 6);               // cano p/ o jogador
-    ctx.fillStyle = '#41495a';
-    ctx.beginPath(); ctx.arc(0,0,8,0,7); ctx.fill();
-    ctx.restore();
-  } else if (e.t === 'build') {
-    // ---- bunker/fortim militar ----
-    ctx.fillStyle = 'rgba(0,0,0,.25)';
-    ctx.fillRect(-w/2+3, -h/2+4, w, h);       // sombra
-    // base de concreto
-    const bgr = ctx.createLinearGradient(0,-h/2,0,h/2);
-    bgr.addColorStop(0,'#8d8576'); bgr.addColorStop(1,'#5f5849');
-    ctx.fillStyle = bgr;
-    ctx.fillRect(-w/2, -h/2, w, h);
-    ctx.strokeStyle = '#3c372c'; ctx.lineWidth = 2;
-    ctx.strokeRect(-w/2, -h/2, w, h);
-    // telhado recuado / plataforma
-    ctx.fillStyle = '#6b6453';
-    ctx.fillRect(-w/2+5, -h/2+5, w-10, h-10);
-    // sacos de areia nos cantos
-    ctx.fillStyle = '#9c8d5f';
-    [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([sx,sy])=>{
+    if (SPR) {
+      const Hs=SPR.shipHull, sc=w/46, dw=Hs.w*sc, dh=Hs.h*sc;
+      ctx.save(); ctx.rotate(rang);
+      ctx.fillStyle = 'rgba(220,240,255,.30)';  // espuma (FX vivo)
       ctx.beginPath();
-      ctx.arc(sx*(w/2-7), sy*(h/2-7), 6, 0, 7); ctx.fill();
-    });
-    // cúpula central com canhão antiaéreo
-    ctx.fillStyle = '#43403a';
-    ctx.beginPath(); ctx.arc(0,0,9,0,7); ctx.fill();
-    const ba = Math.atan2(player.y-e.y, player.x-e.x);
-    ctx.save(); ctx.rotate(ba);
-    ctx.fillStyle = '#26241f';
-    ctx.fillRect(0,-2,18,4);
-    ctx.restore();
-    ctx.fillStyle = '#c5b063';                // luz de alerta piscando
-    if (Math.floor(frame/15)%2)
-      { ctx.beginPath(); ctx.arc(0,0,3,0,7); ctx.fill(); }
-  } else if (e.t === 'boat') {
-    // ---- lancha de patrulha rápida ----
-    const wob = Math.sin((e.y + scrollY) * 0.06) * 0.05;
-    ctx.rotate(wob);
-    // esteira/espuma atrás (-y)
-    ctx.fillStyle = 'rgba(220,240,255,.32)';
-    ctx.beginPath();
-    ctx.moveTo(-7, -h/2); ctx.quadraticCurveTo(0, -h/2-14, 7, -h/2);
-    ctx.fill();
-    // casco em bico (proa em +y)
-    const bg = ctx.createLinearGradient(-w/2,0,w/2,0);
-    bg.addColorStop(0,'#465360'); bg.addColorStop(.5,'#67757f'); bg.addColorStop(1,'#3c4751');
-    ctx.fillStyle = bg;
-    ctx.beginPath();
-    ctx.moveTo(0, h/2);
-    ctx.lineTo(w/2, 0); ctx.lineTo(w/2-3, -h/2+4);
-    ctx.lineTo(-w/2+3, -h/2+4); ctx.lineTo(-w/2, 0);
-    ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#2b323b';                 // convés
-    ctx.fillRect(-w/2+5, -h/4, w-10, h*0.5);
-    ctx.fillStyle = '#8c98a5';                 // cabine
-    ctx.fillRect(-6, -4, 12, 12);
-    ctx.fillStyle = '#bfe9ff';
-    ctx.fillRect(-4, -2, 8, 5);
-    // metralhadora mirando o jogador
-    const ba2 = Math.atan2(player.y - e.y, player.x - e.x);
-    ctx.save(); ctx.rotate(ba2);
-    ctx.fillStyle = '#1d222a'; ctx.fillRect(0, -2, 16, 4);
-    ctx.fillStyle = '#414a59'; ctx.beginPath(); ctx.arc(0,0,5,0,7); ctx.fill();
-    ctx.restore();
-  } else if (e.t === 'warship') {
-    // ---- contratorpedeiro: 2 torres mirando o jogador ----
-    ctx.fillStyle = 'rgba(220,240,255,.30)';
-    ctx.beginPath();
-    ctx.moveTo(-9, -h/2); ctx.quadraticCurveTo(0, -h/2-16, 9, -h/2);
-    ctx.fill();
-    const hg = ctx.createLinearGradient(-w/2,0,w/2,0);
-    hg.addColorStop(0,'#374049'); hg.addColorStop(.5,'#5a6670'); hg.addColorStop(1,'#2f373f');
-    ctx.fillStyle = hg;
-    ctx.beginPath();
-    ctx.moveTo(0, h/2);                         // proa
-    ctx.lineTo(w/2, h*0.18);
-    ctx.lineTo(w/2-2, -h/2+8);
-    ctx.quadraticCurveTo(0, -h/2-2, -w/2+2, -h/2+8);
-    ctx.lineTo(-w/2, h*0.18);
-    ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#272f37';                  // convés
-    ctx.fillRect(-w/2+6, -h*0.34, w-12, h*0.74);
-    ctx.fillStyle = '#7c8a98';                  // superestrutura
-    ctx.fillRect(-11, -h*0.10, 22, 26);
-    ctx.fillStyle = '#cfe6f5';
-    ctx.fillRect(-8, -h*0.06, 16, 7);
-    ctx.fillStyle = '#9aa6b5';                  // mastro radar
-    ctx.fillRect(-2, -h*0.22, 4, 14);
-    ctx.strokeStyle = '#b8c4d2'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(-9,-h*0.20); ctx.lineTo(9,-h*0.20); ctx.stroke();
-    // duas torres giratórias mirando o jogador
-    [h*0.30, -h*0.30].forEach(oy => {
-      ctx.save();
-      ctx.translate(0, oy);
-      const a = Math.atan2(player.y - (e.y+oy), player.x - e.x);
-      ctx.rotate(a);
-      ctx.fillStyle = '#1c212a'; ctx.fillRect(0, -3, 22, 6);
-      ctx.fillStyle = '#3c4654'; ctx.beginPath(); ctx.arc(0,0,8,0,7); ctx.fill();
-      ctx.restore();
-    });
-  } else if (e.t === 'carrier') {
-    // ---- porta-aviões: convés de voo + ilha + canhões + caças ----
-    ctx.fillStyle = 'rgba(220,240,255,.28)';
-    ctx.beginPath();
-    ctx.moveTo(-12, -h/2); ctx.quadraticCurveTo(0, -h/2-20, 12, -h/2);
-    ctx.fill();
-    // casco
-    const cg = ctx.createLinearGradient(-w/2,0,w/2,0);
-    cg.addColorStop(0,'#2f373f'); cg.addColorStop(.5,'#4a5560'); cg.addColorStop(1,'#282f36');
-    ctx.fillStyle = cg;
-    ctx.beginPath();
-    ctx.moveTo(0, h/2);
-    ctx.lineTo(w/2, h*0.30);
-    ctx.lineTo(w/2, -h/2+6);
-    ctx.quadraticCurveTo(0, -h/2-3, -w/2, -h/2+6);
-    ctx.lineTo(-w/2, h*0.30);
-    ctx.closePath(); ctx.fill();
-    // convés de voo
-    ctx.fillStyle = '#33383c';
-    ctx.fillRect(-w/2+5, -h/2+8, w-10, h-20);
-    // pista central tracejada + pista angular
-    ctx.strokeStyle = 'rgba(245,245,210,.7)';
-    ctx.lineWidth = 3;
-    ctx.setLineDash([10, 9]);
-    ctx.beginPath(); ctx.moveTo(0, -h/2+14); ctx.lineTo(0, h/2-16); ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(-w/2+10, h/2-18); ctx.lineTo(w/2-8, -h/2+18); ctx.stroke();
-    ctx.setLineDash([]);
-    // faixas das pontas
-    ctx.strokeStyle = 'rgba(245,245,210,.55)'; ctx.lineWidth = 4;
-    ctx.beginPath(); ctx.moveTo(-w/2+8, h/2-12); ctx.lineTo(w/2-8, h/2-12); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(-w/2+8, -h/2+12); ctx.lineTo(w/2-8, -h/2+12); ctx.stroke();
-    // ilha (superestrutura a estibordo)
-    ctx.fillStyle = '#6d7884';
-    ctx.fillRect(w/2-16, -h*0.10, 13, 40);
-    ctx.fillStyle = '#cfe6f5';
-    ctx.fillRect(w/2-14, -h*0.07, 9, 6);
-    ctx.fillStyle = '#9aa6b5';
-    ctx.fillRect(w/2-11, -h*0.10-12, 3, 12);   // mastro
-    // caça estacionado no convés
-    ctx.save();
-    ctx.translate(-w*0.22, -h*0.22);
-    ctx.fillStyle = '#aeb7c2';
-    ctx.beginPath();
-    ctx.moveTo(0, 10); ctx.lineTo(3, 0); ctx.lineTo(3,-9);
-    ctx.lineTo(-3,-9); ctx.lineTo(-3, 0); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#8a94a0';
-    ctx.fillRect(-10, -2, 20, 4);
-    ctx.restore();
-    // fumaça/flash de catapulta ao lançar
-    if (e.launchFx > 0) {
-      ctx.fillStyle = `rgba(255,230,170,${e.launchFx/14})`;
-      ctx.beginPath();
-      ctx.arc(0, h*0.30, 10 + (10-e.launchFx)*1.5, 0, 7);
+      ctx.moveTo(-8,-h/2); ctx.quadraticCurveTo(0,-h/2-12,8,-h/2);
       ctx.fill();
-    }
-    // canhões antiaéreos nas 4 quinas, mirando o jogador
-    [[-w*0.40, h*0.36],[w*0.40, h*0.36],
-     [-w*0.40,-h*0.36],[w*0.40,-h*0.36]].forEach(([ox,oy]) => {
-      ctx.save();
-      ctx.translate(ox, oy);
-      const a = Math.atan2(player.y - (e.y+oy), player.x - (e.x+ox));
-      ctx.rotate(a);
-      ctx.fillStyle = '#1b212a'; ctx.fillRect(0, -2, 14, 4);
-      ctx.fillStyle = '#3a4450'; ctx.beginPath(); ctx.arc(0,0,5,0,7); ctx.fill();
+      ctx.drawImage(Hs.a, -dw/2, -dh/2, dw, dh);
+      // fumaça das chaminés (FX vivo, aditivo)
+      ctx.globalCompositeOperation = 'lighter';
+      const sm = ctx.createRadialGradient(0,-h*0.42,1,0,-h*0.42,12);
+      sm.addColorStop(0,`rgba(80,80,80,${.26+.16*Math.sin(frame*0.25)})`);
+      sm.addColorStop(1,'rgba(70,70,70,0)');
+      ctx.fillStyle = sm;
+      ctx.beginPath(); ctx.arc(0,-h*0.42,12,0,7); ctx.fill();
       ctx.restore();
-    });
+      nx.save(); nx.translate(e.x,e.y); nx.rotate(rang);
+      nx.drawImage(Hs.n, -dw/2, -dh/2, dw, dh); nx.restore();
+      // torre principal (dupla) mirando o player, no convés de proa
+      const sa = Math.atan2(player.y-e.y, player.x-e.x);
+      const G=SPR.shipGun, gw=G.w*sc, gh=G.h*sc, oy=h*0.16;
+      ctx.save(); ctx.translate(0,oy); ctx.rotate(sa);
+      ctx.drawImage(G.a, -gw/2, -gh/2, gw, gh); ctx.restore();
+      nx.save(); nx.translate(e.x,e.y+oy); nx.rotate(sa);
+      nx.drawImage(G.n, -gw/2, -gh/2, gw, gh); nx.restore();
+    }
+  } else if (e.t === 'build') {
+    // ---- bunker/fortim de concreto + canhão giratório (HD assado) ----
+    if (SPR) {
+      const B=SPR.bunker, sc=w/40, dw=B.w*sc, dh=B.h*sc;
+      ctx.drawImage(B.a, -dw/2, -dh/2, dw, dh);
+      nx.save(); nx.translate(e.x, e.y);
+      nx.drawImage(B.n, -dw/2, -dh/2, dw, dh); nx.restore();
+      // canhão antiaéreo mirando o player
+      const ba = Math.atan2(player.y-e.y, player.x-e.x);
+      const G=SPR.bunkerGun, gw=G.w*sc, gh=G.h*sc;
+      ctx.save(); ctx.rotate(ba);
+      ctx.drawImage(G.a, -gw/2, -gh/2, gw, gh);
+      ctx.restore();
+      nx.save(); nx.translate(e.x, e.y); nx.rotate(ba);
+      nx.drawImage(G.n, -gw/2, -gh/2, gw, gh); nx.restore();
+    }
+    // luz de alerta piscando (FX vivo, aditivo)
+    if (Math.floor(frame/15)%2) {
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      const lg = ctx.createRadialGradient(0,0,0,0,0,7);
+      lg.addColorStop(0,'rgba(255,210,90,.95)');
+      lg.addColorStop(1,'rgba(255,150,40,0)');
+      ctx.fillStyle = lg;
+      ctx.beginPath(); ctx.arc(0,0,7,0,7); ctx.fill();
+      ctx.restore();
+    }
+  } else if (e.t === 'boat') {
+    // ---- lancha de patrulha HD (proa +y) + metralhadora ----
+    const wob = Math.sin((e.y + scrollY) * 0.06) * 0.05;
+    if (SPR) {
+      const Hb=SPR.boatHull, sc=w/34, dw=Hb.w*sc, dh=Hb.h*sc;
+      ctx.save(); ctx.rotate(wob);
+      ctx.fillStyle = 'rgba(220,240,255,.32)';   // espuma (FX vivo)
+      ctx.beginPath();
+      ctx.moveTo(-7,-h/2); ctx.quadraticCurveTo(0,-h/2-14,7,-h/2);
+      ctx.fill();
+      ctx.drawImage(Hb.a, -dw/2, -dh/2, dw, dh);
+      ctx.restore();
+      nx.save(); nx.translate(e.x,e.y); nx.rotate(wob);
+      nx.drawImage(Hb.n, -dw/2, -dh/2, dw, dh); nx.restore();
+      const ba2 = Math.atan2(player.y-e.y, player.x-e.x);
+      const G=SPR.navGun, gs=sc*0.62, gw=G.w*gs, gh=G.h*gs;
+      ctx.save(); ctx.rotate(ba2);
+      ctx.drawImage(G.a, -gw/2, -gh/2, gw, gh); ctx.restore();
+      nx.save(); nx.translate(e.x,e.y); nx.rotate(ba2);
+      nx.drawImage(G.n, -gw/2, -gh/2, gw, gh); nx.restore();
+    }
+  } else if (e.t === 'warship') {
+    // ---- destróier stealth: 2 torres principais + 2 CIWS ----
+    if (SPR) {
+      const Hw=SPR.warHull, sc=w/54, dw=Hw.w*sc, dh=Hw.h*sc;
+      ctx.fillStyle = 'rgba(220,240,255,.30)';   // espuma (FX vivo)
+      ctx.beginPath();
+      ctx.moveTo(-9,-h/2); ctx.quadraticCurveTo(0,-h/2-16,9,-h/2);
+      ctx.fill();
+      ctx.drawImage(Hw.a, -dw/2, -dh/2, dw, dh);
+      nx.save(); nx.translate(e.x,e.y);
+      nx.drawImage(Hw.n, -dw/2, -dh/2, dw, dh); nx.restore();
+      const aim = oy => Math.atan2(player.y-(e.y+oy), player.x-e.x);
+      const gun = (S,gs,oy) => {
+        const a=aim(oy), gw=S.w*gs, gh=S.h*gs;
+        ctx.save(); ctx.translate(0,oy); ctx.rotate(a);
+        ctx.drawImage(S.a, -gw/2, -gh/2, gw, gh); ctx.restore();
+        nx.save(); nx.translate(e.x, e.y+oy); nx.rotate(a);
+        nx.drawImage(S.n, -gw/2, -gh/2, gw, gh); nx.restore();
+      };
+      // torres principais duplas (proa e popa) + 2 CIWS amidships
+      gun(SPR.shipGun, sc*1.05,  h*0.22);
+      gun(SPR.shipGun, sc*1.05, -h*0.34);
+      gun(SPR.navGun,  sc*0.55, -h*0.10);
+      gun(SPR.navGun,  sc*0.55,  h*0.02);
+    }
+  } else if (e.t === 'carrier') {
+    // ---- porta-aviões HD: convés + ilha + 4 AA giratórios ----
+    if (SPR) {
+      const Hc=SPR.carrierHull, sc=w/86, dw=Hc.w*sc, dh=Hc.h*sc;
+      ctx.fillStyle = 'rgba(220,240,255,.28)';   // espuma (FX vivo)
+      ctx.beginPath();
+      ctx.moveTo(-12,-h/2); ctx.quadraticCurveTo(0,-h/2-20,12,-h/2);
+      ctx.fill();
+      ctx.drawImage(Hc.a, -dw/2, -dh/2, dw, dh);
+      nx.save(); nx.translate(e.x,e.y);
+      nx.drawImage(Hc.n, -dw/2, -dh/2, dw, dh); nx.restore();
+      // flash de catapulta ao lançar (FX vivo, aditivo)
+      if (e.launchFx > 0) {
+        ctx.save(); ctx.globalCompositeOperation='lighter';
+        ctx.fillStyle = `rgba(255,230,170,${e.launchFx/14})`;
+        ctx.beginPath();
+        ctx.arc(0, h*0.30, 10+(10-e.launchFx)*1.5, 0, 7); ctx.fill();
+        ctx.restore();
+      }
+      // 4 canhões AA nas quinas, mirando o player
+      const G=SPR.navGun, gs=sc*0.7, gw=G.w*gs, gh=G.h*gs;
+      [[-w*0.40,h*0.36],[w*0.40,h*0.36],
+       [-w*0.40,-h*0.36],[w*0.40,-h*0.36]].forEach(([ox,oy])=>{
+        const a = Math.atan2(player.y-(e.y+oy), player.x-(e.x+ox));
+        ctx.save(); ctx.translate(ox,oy); ctx.rotate(a);
+        ctx.drawImage(G.a, -gw/2, -gh/2, gw, gh); ctx.restore();
+        nx.save(); nx.translate(e.x+ox, e.y+oy); nx.rotate(a);
+        nx.drawImage(G.n, -gw/2, -gh/2, gw, gh); nx.restore();
+      });
+    }
   } else { // ---- caça a jato (nariz em +y) ----
     // chama do pós-combustor (FX vivo, atrás = -y) — 2 motores
     ctx.save(); ctx.globalCompositeOperation = 'lighter';
@@ -2521,84 +3428,100 @@ function render() {
 }
 
 function drawBossTank(b, W2, H2, hurt, gl) {
-  ctx.fillStyle = 'rgba(0,0,0,.3)';
-  ctx.beginPath(); ctx.ellipse(8, 8, W2+4, H2*0.95, 0, 0, 7); ctx.fill();
-  const trW = 24;
+  ctx.fillStyle = 'rgba(0,0,0,.34)';
+  ctx.beginPath(); ctx.ellipse(10, 10, W2+6, H2*0.96, 0, 0, 7); ctx.fill();
+
+  const sc = b.w/128;
+  // corpo HD assado
+  if (SPR) {
+    const B=SPR.bossTankBody, dw=B.w*sc, dh=B.h*sc;
+    ctx.drawImage(B.a, -dw/2, -dh/2, dw, dh);
+    nx.save(); nx.translate(b.x, b.y);
+    nx.drawImage(B.n, -dw/2, -dh/2, dw, dh); nx.restore();
+  }
+  // links de esteira ANIMADOS (FX vivo) sobre a base assada
+  const trW = 24*sc, txc = (W2 - 12)*sc;
+  ctx.fillStyle = '#3a3d44';
+  const ph = ((b.tread % 16)+16)%16;
   [-1,1].forEach(s => {
-    const cx = s*(W2 - trW/2);
-    ctx.fillStyle = '#1f2227';
-    ctx.fillRect(cx-trW/2, -H2, trW, b.h);
-    ctx.fillStyle = '#3a3d44';
-    const ph = ((b.tread % 16)+16)%16;
-    for (let y=-H2-16+ph; y<H2; y+=16) ctx.fillRect(cx-trW/2, y, trW, 8);
+    const cx = s*txc;
+    for (let y=-H2-16+ph; y<H2; y+=16)
+      ctx.fillRect(cx-trW/2, y, trW, 7);
   });
-  const hw = b.w - trW*2 + 6;
-  const hg = ctx.createLinearGradient(-hw/2,0,hw/2,0);
-  hg.addColorStop(0,'#4d5a3c'); hg.addColorStop(.5,'#6b7a4e'); hg.addColorStop(1,'#3f4a32');
-  ctx.fillStyle = hg;
-  ctx.beginPath();
-  ctx.moveTo(-hw/2,-H2+10); ctx.lineTo(0,-H2); ctx.lineTo(hw/2,-H2+10);
-  ctx.lineTo(hw/2,H2-20); ctx.lineTo(hw/2-12,H2);
-  ctx.lineTo(-hw/2+12,H2); ctx.lineTo(-hw/2,H2-20); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = '#caa92f';
-  ctx.fillRect(-hw/2+12, H2-12, hw-24, 8);
-  ctx.fillStyle = '#1d1f12';
-  for (let x=-hw/2+12; x<hw/2-12; x+=14) ctx.fillRect(x, H2-12, 7, 8);
-  // motor traseiro brilhando
-  ctx.fillStyle = '#23281c'; ctx.fillRect(-24,-H2+12,48,26);
+  // escape do motor (traseira -y, ponto fraco) — FX vivo
   ctx.fillStyle = `rgba(255,${110+gl*120|0},40,${.5+gl*.4})`;
-  for (let i=-1;i<2;i++) ctx.fillRect(-18+i*15,-H2+16,9,18);
+  for (let i=-1;i<2;i++) ctx.fillRect(-18*sc+i*15*sc, -H2+16*sc, 9*sc, 16*sc);
   if (hurt) { ctx.fillStyle=`rgba(40,40,40,${.25+gl*.2})`;
-    ctx.beginPath(); ctx.arc(0,-H2+4,16+gl*6,0,7); ctx.fill(); }
-  // torre giratória + canhão duplo
+    ctx.beginPath(); ctx.arc(0,-H2+6,18+gl*7,0,7); ctx.fill(); }
+
+  // torre + canhão duplo HD, girando p/ mirar o player
   const ang = Math.atan2(player.y-b.y, player.x-b.x);
-  ctx.save(); ctx.rotate(ang);
-  ctx.fillStyle='#23271b'; ctx.fillRect(0,-7,60,6); ctx.fillRect(0,1,60,6);
-  ctx.fillStyle='#11130d'; ctx.fillRect(54,-9,9,8); ctx.fillRect(54,1,9,8);
-  const tg = ctx.createRadialGradient(-6,-6,4,0,0,28);
-  tg.addColorStop(0,'#7d8a5c'); tg.addColorStop(1,'#454f33');
-  ctx.fillStyle=tg; ctx.beginPath(); ctx.arc(0,0,28,0,7); ctx.fill();
-  ctx.fillStyle='#363c26'; ctx.beginPath(); ctx.arc(-5,0,9,0,7); ctx.fill();
-  ctx.restore();
-  if (hurt) { ctx.strokeStyle=`rgba(255,60,40,${.3+gl*.3})`;
-    ctx.lineWidth=3; ctx.strokeRect(-W2,-H2,b.w,b.h); }
+  if (SPR) {
+    const T=SPR.bossTankTurret, dw=T.w*sc, dh=T.h*sc;
+    ctx.save(); ctx.rotate(ang);
+    ctx.drawImage(T.a, -dw/2, -dh/2, dw, dh);
+    ctx.restore();
+    nx.save(); nx.translate(b.x, b.y); nx.rotate(ang);
+    nx.drawImage(T.n, -dw/2, -dh/2, dw, dh); nx.restore();
+  }
+  // flash de dano: brilho vermelho radial (sem quadrado)
+  if (hurt) {
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    const r = Math.max(W2,H2)*1.15;
+    const fg = ctx.createRadialGradient(0,0,r*0.4,0,0,r);
+    fg.addColorStop(0,`rgba(255,70,45,${.26+gl*.26})`);
+    fg.addColorStop(1,'rgba(255,40,30,0)');
+    ctx.fillStyle = fg;
+    ctx.beginPath(); ctx.arc(0,0,r,0,7); ctx.fill();
+    ctx.restore();
+  }
 }
 function drawBossShip(b, W2, H2, hurt, gl) {
-  // esteira de espuma atrás
+  const sc = b.w/120;
+  // esteira de espuma na popa (FX vivo)
   ctx.fillStyle = 'rgba(220,240,255,.25)';
-  ctx.beginPath(); ctx.moveTo(-14,-H2);
-  ctx.quadraticCurveTo(0,-H2-22,14,-H2); ctx.fill();
-  // casco (proa em +y)
-  const hg = ctx.createLinearGradient(-W2,0,W2,0);
-  hg.addColorStop(0,'#33414e'); hg.addColorStop(.5,'#5a6878'); hg.addColorStop(1,'#2c3742');
-  ctx.fillStyle = hg;
-  ctx.beginPath();
-  ctx.moveTo(0,H2); ctx.lineTo(W2,H2*0.45); ctx.lineTo(W2-3,-H2+10);
-  ctx.quadraticCurveTo(0,-H2-4,-W2+3,-H2+10);
-  ctx.lineTo(-W2,H2*0.45); ctx.closePath(); ctx.fill();
-  // convés
-  ctx.fillStyle = '#27313c';
-  ctx.fillRect(-W2+8,-H2+14,b.w-16,b.h-28);
-  // superestrutura central
-  ctx.fillStyle = '#7a8799'; ctx.fillRect(-16,-14,32,40);
-  ctx.fillStyle = '#cfe6f5'; ctx.fillRect(-12,-10,24,10);
-  ctx.fillStyle = '#9aa6b5'; ctx.fillRect(-3,-30,6,16);   // mastro
-  // chaminés com fumaça
-  ctx.fillStyle = '#33383f';
-  [-8,8].forEach(ox=>ctx.fillRect(ox-4,30,8,12));
-  if (hurt){ ctx.fillStyle=`rgba(40,40,40,${.3+gl*.2})`;
-    ctx.beginPath(); ctx.arc(0,40,14+gl*6,0,7); ctx.fill(); }
-  // 3 torres de canhão giratórias mirando o jogador
-  [{x:0,y:H2*0.55},{x:0,y:-H2*0.45},{x:0,y:0}].forEach(t=>{
-    ctx.save(); ctx.translate(t.x,t.y);
-    const a = Math.atan2(player.y-(b.y+t.y), player.x-b.x);
-    ctx.rotate(a);
-    ctx.fillStyle='#1f2730'; ctx.fillRect(0,-4,26,8);
-    ctx.fillStyle='#46505e'; ctx.beginPath(); ctx.arc(0,0,10,0,7); ctx.fill();
-    ctx.restore();
+  ctx.beginPath(); ctx.moveTo(-16,-H2);
+  ctx.quadraticCurveTo(0,-H2-24,16,-H2); ctx.fill();
+  // casco HD assado
+  if (SPR) {
+    const Hs=SPR.bossShipHull, dw=Hs.w*sc, dh=Hs.h*sc;
+    ctx.drawImage(Hs.a, -dw/2, -dh/2, dw, dh);
+    nx.save(); nx.translate(b.x,b.y);
+    nx.drawImage(Hs.n, -dw/2, -dh/2, dw, dh); nx.restore();
+  }
+  // fumaça das chaminés (FX vivo aditivo)
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  [[-3*sc,-18*sc],[3*sc,4*sc]].forEach(([ox,oy])=>{
+    const s=ctx.createRadialGradient(ox,oy,1,ox,oy,16);
+    s.addColorStop(0,`rgba(70,70,70,${.22+.14*Math.sin(frame*0.22)})`);
+    s.addColorStop(1,'rgba(60,60,60,0)');
+    ctx.fillStyle=s; ctx.beginPath(); ctx.arc(ox,oy,16,0,7); ctx.fill();
   });
-  if (hurt) { ctx.strokeStyle=`rgba(255,60,40,${.3+gl*.3})`;
-    ctx.lineWidth=3; ctx.strokeRect(-W2,-H2,b.w,b.h); }
+  ctx.restore();
+  if (hurt){ ctx.fillStyle=`rgba(40,40,40,${.3+gl*.2})`;
+    ctx.beginPath(); ctx.arc(0,H2*0.5,16+gl*7,0,7); ctx.fill(); }
+  // 3 torres de bateria principal giratórias mirando o player
+  if (SPR) {
+    const T=SPR.bossShipTurret, dw=T.w*sc, dh=T.h*sc;
+    [H2*0.56, 0, -H2*0.5].forEach(oy=>{
+      const a = Math.atan2(player.y-(b.y+oy), player.x-b.x);
+      ctx.save(); ctx.translate(0,oy); ctx.rotate(a);
+      ctx.drawImage(T.a, -dw/2, -dh/2, dw, dh); ctx.restore();
+      nx.save(); nx.translate(b.x, b.y+oy); nx.rotate(a);
+      nx.drawImage(T.n, -dw/2, -dh/2, dw, dh); nx.restore();
+    });
+  }
+  // flash de dano: brilho vermelho radial (sem quadrado)
+  if (hurt) {
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    const r = Math.max(W2,H2)*1.1;
+    const fg = ctx.createRadialGradient(0,0,r*0.4,0,0,r);
+    fg.addColorStop(0,`rgba(255,70,45,${.24+gl*.24})`);
+    fg.addColorStop(1,'rgba(255,40,30,0)');
+    ctx.fillStyle = fg;
+    ctx.beginPath(); ctx.arc(0,0,r,0,7); ctx.fill();
+    ctx.restore();
+  }
 }
 function drawBoss() {
   const b = boss;
@@ -2620,75 +3543,21 @@ function drawBoss() {
   ctx.save();
   ctx.rotate(b.bank || 0);
 
-  // ---- lança de cauda + estabilizador + rotor de cauda ----
-  ctx.fillStyle = '#39433a';
-  ctx.beginPath();
-  ctx.moveTo(-7, -H2+30); ctx.lineTo(7, -H2+30);
-  ctx.lineTo(4, -H2-30); ctx.lineTo(-4, -H2-30);
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = '#2d352e';
-  ctx.fillRect(-22, -H2-26, 44, 9);            // estabilizador
-  const ta = frame*1.3;                         // rotor de cauda
+  // ---- corpo HD assado (banca junto; normal no cvN) ----
+  if (SPR) {
+    const Bh=SPR.bossHeli, sc=b.w/154, dw=Bh.w*sc, dh=Bh.h*sc;
+    ctx.drawImage(Bh.a, -dw/2, -dh/2, dw, dh);
+    nx.save(); nx.translate(b.x, b.y); nx.rotate(b.bank||0);
+    nx.drawImage(Bh.n, -dw/2, -dh/2, dw, dh); nx.restore();
+  }
+  // rotor de cauda (FX vivo)
+  const ta = frame*1.3;
   ctx.strokeStyle = '#c8ccc4'; ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(-6 - Math.cos(ta)*16, -H2-30 - Math.sin(ta)*16*0);
+  ctx.moveTo(-6 - Math.cos(ta)*16, -H2-30);
   ctx.lineTo(-6 + Math.cos(ta)*16, -H2-30);
   ctx.stroke();
-
-  // ---- asas curtas com pods de foguete e mísseis ----
-  [-1, 1].forEach(s => {
-    ctx.fillStyle = '#454f3c';
-    ctx.beginPath();
-    ctx.moveTo(s*16, -6);
-    ctx.lineTo(s*(W2+4), 4);
-    ctx.lineTo(s*(W2+4), 24);
-    ctx.lineTo(s*16, 20);
-    ctx.closePath(); ctx.fill();
-    // pod de foguetes (cilindro com bocas)
-    ctx.fillStyle = '#2b2f25';
-    ctx.fillRect(s*W2-9, 4, 22, 18);
-    ctx.fillStyle = hurt ? '#ff7a2a' : '#11130d';
-    for (let i=0;i<3;i++)
-      { ctx.beginPath(); ctx.arc(s*W2-3+i*7, 22, 2.4, 0, 7); ctx.fill(); }
-    // míssil sob a asa
-    ctx.fillStyle = '#9aa0a8';
-    ctx.fillRect(s*(W2*0.66)-3, 4, 6, 26);
-    ctx.fillStyle = '#d8362a';
-    ctx.beginPath();
-    ctx.moveTo(s*(W2*0.66)-3,30); ctx.lineTo(s*(W2*0.66),36);
-    ctx.lineTo(s*(W2*0.66)+3,30); ctx.closePath(); ctx.fill();
-  });
-
-  // ---- fuselagem blindada (gunship) ----
-  const fg = ctx.createLinearGradient(-26,0,26,0);
-  fg.addColorStop(0,'#39432f'); fg.addColorStop(.5,'#5c6a45');
-  fg.addColorStop(1,'#323b29');
-  ctx.fillStyle = fg;
-  ctx.beginPath();
-  ctx.moveTo(0, H2);                            // nariz (frente, +y)
-  ctx.quadraticCurveTo(26, H2-10, 24, H2*0.3);
-  ctx.lineTo(20, -H2+34);
-  ctx.quadraticCurveTo(16, -H2+10, 7, -H2+30);
-  ctx.lineTo(-7, -H2+30);
-  ctx.quadraticCurveTo(-16, -H2+10, -20, -H2+34);
-  ctx.lineTo(-24, H2*0.3);
-  ctx.quadraticCurveTo(-26, H2-10, 0, H2);
-  ctx.closePath(); ctx.fill();
-  // painéis
-  ctx.strokeStyle = 'rgba(0,0,0,.3)'; ctx.lineWidth = 2;
-  ctx.strokeRect(-15, -H2+34, 30, b.h-46);
-
-  // canopies em tandem (piloto + artilheiro)
-  ctx.fillStyle = '#0e1b12';
-  ctx.beginPath(); ctx.ellipse(0, H2*0.34, 12, 16, 0, 0, 7); ctx.fill();
-  ctx.beginPath(); ctx.ellipse(0, -2, 13, 15, 0, 0, 7); ctx.fill();
-  ctx.fillStyle = 'rgba(120,200,170,.45)';
-  ctx.beginPath(); ctx.ellipse(0, H2*0.34, 9, 12, 0, 0, 7); ctx.fill();
-  ctx.beginPath(); ctx.ellipse(0, -2, 10, 11, 0, 0, 7); ctx.fill();
-
-  // turbinas com exaustão quente (ponto fraco)
-  ctx.fillStyle = '#23281c';
-  ctx.fillRect(-20, -H2+30, 40, 16);
+  // exaustão quente das turbinas (ponto fraco, FX vivo)
   ctx.fillStyle = `rgba(255,${110+gl*120|0},40,${.5+gl*.4})`;
   ctx.fillRect(-16, -H2+34, 12, 9);
   ctx.fillRect(4, -H2+34, 12, 9);

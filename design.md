@@ -200,7 +200,11 @@ entidades HD escrevem relevo).
 Sem WebGL disponível, faz **fallback** automático para o canvas 2D (zero
 quebra). A lógica de jogo não foi tocada.
 
-> **Status:** em propagação — heli, tanque, floresta e **trem de guerra
-> blindado** (locomotiva-cunha + vagões + canhão de topo giratório) já
-> usam o pipeline HD+luz. Demais inimigos/chefes/biomas seguem na arte
-> antiga (normal plano) e serão migrados na sequência.
+> **Status:** em propagação — já usam o pipeline HD+luz: heli, tanque,
+> floresta, **trem de guerra blindado**, **caça stealth (F-22)**,
+> **bunker/fortim** e toda a **frota naval** (canhoneira, lancha,
+> contratorpedeiro, porta-aviões + torre naval reutilizável). Faltam:
+> chefes e o solo dos biomas (deserto/gelo/cidade/oceano).
+>
+> O **caça** dispara o míssil quando fica **alinhado/de frente para o
+> heli** (antes era em momento aleatório).

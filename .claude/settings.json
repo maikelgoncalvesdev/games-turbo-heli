@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n \"function drawBoss\\\\|ctx.restore\\(\\);\\\\s*$\\\\|fim do banking\\\\|contorno de status\" \"d:/Dev/src-github/games/tiger heli/index.html\")",
+      "Bash(node -e \"const s=require\\('fs'\\).readFileSync\\('index.html','utf8'\\);const m=s.match\\(/<script>\\([\\\\s\\\\S]*\\)<\\\\/script>/\\);new Function\\(m[1]\\);console.log\\('JS OK'\\);\")",
+      "Bash(node -e \"const s=require\\('fs'\\).readFileSync\\('index.html','utf8'\\);new Function\\(s.match\\(/<script>\\([\\\\s\\\\S]*\\)<\\\\/script>/\\)[1]\\);console.log\\('JS OK'\\)\")",
+      "Bash(node -e \"let l=require\\('fs'\\).readFileSync\\('index.html','utf8'\\).split\\('\\\\n'\\); let out=l.slice\\(0,1029\\).join\\('\\\\n'\\)+'\\\\n@@@MARK@@@\\\\n'+l.slice\\(1162\\).join\\('\\\\n'\\); require\\('fs'\\).writeFileSync\\('index.html',out\\);\")",
+      "Bash(node -e ' *)",
+      "Bash(node -e \"const f=require\\('fs'\\).readFileSync\\('index.html','utf8'\\);const m=f.match\\(/<script>\\([\\\\s\\\\S]*?\\)<\\\\/script>/\\);new Function\\(m[1]\\);console.log\\('JS OK, len',m[1].length\\)\")",
+      "Bash(node -e \"const f=require\\('fs'\\).readFileSync\\('index.html','utf8'\\);const m=f.match\\(/<script>\\([\\\\s\\\\S]*?\\)<\\\\/script>/\\);new Function\\(m[1]\\);console.log\\('JS OK'\\)\")",
+      "PowerShell(gh --version)",
+      "PowerShell(git config user.name)",
+      "PowerShell(git config user.email)",
+      "PowerShell(git init)",
+      "PowerShell(git add -A)"
+    ]
+  }
+}

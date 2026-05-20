@@ -8,6 +8,8 @@ o máximo de fases que conseguir.
 **100% HTML5 + Canvas, em um único arquivo, sem dependências e sem assets
 externos** — toda a arte e todo o áudio são gerados por código.
 
+**Turbo Heli faz parte dos meus estudos e desafio pessoal de ver o que posso fazer com IA sem tocar em código.
+
 ---
 
 ## ▶️ Como jogar
@@ -56,6 +58,7 @@ para iniciar/reiniciar.
   - 🚁 Helicóptero de ataque (estilo Hind)
   - 🛡️ Tanque pesado
   - 🚢 Encouraçado
+  - 🚆 Trem blindado
 
 ### Cenários (biomas)
 Biomas sorteados de forma aleatória/determinística, com **transição suave**
@@ -77,6 +80,8 @@ animada, pontes de estrada e ferrovia, e bancos de areia.
 ### Apresentação
 - Identidade visual estilo **cartoon/arcade**: sombras de contato, gradientes,
   brilho aditivo nas explosões, moldura de fliperama com **scanlines + vinheta**.
+- **Iluminação diferida em WebGL** com luzes dinâmicas (tiros, explosões, faróis)
+  e **pós-processamento com bloom** sobre o canvas 2D.
 - Screen shake, tracers com brilho, mísseis com rastro de chama.
 - HUD com pontos, recorde (salvo em `localStorage`), vidas, fase e armas.
 
@@ -104,7 +109,8 @@ Para detalhes aprofundados de arte e decisões de design, veja
 
 ## 🛠️ Tecnologia
 
-- **HTML5 Canvas 2D** para renderização.
+- **HTML5 Canvas 2D** para renderização da cena, com **WebGL** para a
+  pipeline de iluminação diferida e pós-processamento (bloom).
 - **WebAudio API** para áudio sintetizado em tempo real.
 - Geração procedural determinística (hash) para cenário estável e reproduzível.
 - Resolução interna fixa (480×640) escalada por CSS, mantendo nitidez

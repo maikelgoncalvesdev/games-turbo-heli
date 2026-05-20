@@ -17,13 +17,17 @@ addEventListener('keydown', e => {
     renderMode();
   }
   if (e.code === 'Enter' && !e.repeat) {
-    if (state === 'bonus' && bonus && bonus.done) continueAfterBonus();
+    if (state === 'bonus' && bonus) {
+      // ainda contando? pula a animação. já terminou? continua p/ próxima fase.
+      if (bonus.done) continueAfterBonus();
+      else            skipBonusTally();
+    }
     else if (state === 'play' || state === 'pause') togglePause();
     else startGame();
   }
-  if (e.code === 'Space' && !e.repeat &&
-      state === 'bonus' && bonus && bonus.done) {
-    continueAfterBonus();
+  if (e.code === 'Space' && !e.repeat && state === 'bonus' && bonus) {
+    if (bonus.done) continueAfterBonus();
+    else            skipBonusTally();
   }
 });
 addEventListener('keyup', e => keys[e.code] = false);
@@ -100,8 +104,10 @@ addEventListener('keydown', e => {
     initAudio();
     if (state === 'menu' || state === 'over') { e.preventDefault(); startGame(); }
     else if (state === 'pause') { e.preventDefault(); togglePause(); }
-    else if (state === 'bonus' && bonus && bonus.done) {
-      e.preventDefault(); continueAfterBonus();
+    else if (state === 'bonus' && bonus) {
+      e.preventDefault();
+      if (bonus.done) continueAfterBonus();
+      else            skipBonusTally();
     }
   }, {passive:false});
 })();
@@ -133,7 +139,7 @@ function addShake(n){ shake = Math.min(14, shake + n); }
 
 // --- escalonamento de dificuldade por fase ---
 const STAGE_FRAMES = 2600;          // duração de cada fase antes do chefe
-const BOSS_KINDS = ['heli', 'tank', 'ship'];
+const BOSS_KINDS = ['heli', 'tank', 'ship', 'train'];
 function diff() {
   const s = stage || 1;
   return {
@@ -607,14 +613,26 @@ function applyPower(kind) {
 }
 
 // ---- chefe ----
-function spawnBoss() {
-  SFX.warn();
+// tipo do chefe da fase atual, já considerando regras de bioma
+function nextBossKind() {
   let kind = BOSS_KINDS[(stage - 1) % BOSS_KINDS.length];
-  // encouraçado SÓ no oceano; em terra, tanque (helicóptero em qualquer lugar)
   if (biomeOf(segOf(player.y)) === 'ocean') {
-    if (kind === 'tank') kind = 'ship';
+    if (kind === 'tank' || kind === 'train') kind = 'ship';
   } else {
     if (kind === 'ship') kind = 'tank';
+  }
+  return kind;
+}
+function spawnBoss() {
+  SFX.warn();
+  let kind = nextBossKind();
+  // o gating em update() só chama spawnBoss quando o trilho já existe;
+  // mesmo assim conferimos aqui (defensivo)
+  let trainRailY = null;
+  if (kind === 'train') {
+    const rl = findTrainRail();
+    if (rl) trainRailY = railScreenY(rl.n) + 10;
+    else    return;       // não deve acontecer; deixa pendente p/ próximo tick
   }
   const hp = ehp(120 + (stage - 1) * 45);
   const base = { kind, hp, maxhp: hp, cd: 60, rkt: 130,
@@ -624,11 +642,17 @@ function spawnBoss() {
     Object.assign(base, { w:154, h:122, baseY:116 });
   else if (kind === 'tank')
     Object.assign(base, { w:128, h:140, baseY:90, maxY:H*0.5 });
-  else // ship
+  else if (kind === 'ship')
     Object.assign(base, { w:120, h:170, baseY:120, vx:1.5 });
+  else /* train */
+    Object.assign(base, { w:204, h:54, baseY: trainRailY,
+                          vx: 1.7, x: -120, smokeT: 0 });
   boss = base;
-  setBanner('CHEFE ' + stage, kind === 'heli' ? 'HELICÓPTERO DE ATAQUE'
-    : kind === 'tank' ? 'TANQUE PESADO' : 'ENCOURAÇADO');
+  setBanner('CHEFE ' + stage,
+      kind === 'heli'  ? 'HELICÓPTERO DE ATAQUE'
+    : kind === 'tank'  ? 'TANQUE PESADO'
+    : kind === 'ship'  ? 'ENCOURAÇADO'
+    :                    'TREM BLINDADO');
 }
 function bossShoot(b, hard) {
   const aim = (sx, sy, sp, spread, n) => {
@@ -667,7 +691,7 @@ function bossShoot(b, hard) {
       }
       SFX.hit(); b.cd = (hard ? 70 : 100) - agg*8;
     }
-  } else { // ship: bordadas + canhão mirado
+  } else if (b.kind === 'ship') {
     b.cd--;
     if (b.cd <= 0) {
       aim(b.x, b.y+b.h*0.2, 3.4, 0.12, 3);
@@ -675,14 +699,38 @@ function bossShoot(b, hard) {
         aim(b.x+ox, b.y, 3.0, 0.5, hard ? 4 : 3));
       SFX.hit(); b.cd = hard ? 52 : 84;
     }
+  } else { // train: canhão central + mísseis das pods laterais
+    b.cd--;
+    if (b.cd <= 0) {
+      // canhão da torreta mira no heli (3-4 tiros em leque)
+      aim(b.x, b.y, 3.5, 0.13, hard ? 4 : 3);
+      SFX.hit();
+      b.cd = hard ? 52 : 80;
+    }
+    b.rkt--;
+    if (b.rkt <= 0) {
+      // 2 mísseis das pods laterais descem mirando à frente do heli
+      [-b.w*0.30, b.w*0.30].forEach(ox =>
+        eBullets.push({ x: b.x + ox, y: b.y + b.h*0.30, w:9, h:18,
+          vx: ox*0.012, vy: 4.6, missile:true }));
+      SFX.boom(); addShake(4);
+      b.rkt = hard ? 105 : 165;
+    }
   }
 }
 function updateBoss() {
   const b = boss;
   b.rotor += 0.9; b.tread += 2;
   if (b.intro) {
-    b.y += 1.7;
-    if (b.y >= b.baseY) b.intro = false;
+    if (b.kind === 'train') {
+      // entra deslizando pelo trilho a partir da esquerda
+      b.y = b.baseY;
+      b.x += 2.6;
+      if (b.x >= W * 0.30) b.intro = false;
+    } else {
+      b.y += 1.7;
+      if (b.y >= b.baseY) b.intro = false;
+    }
     return;
   }
   const hard = b.hp < b.maxhp/2;
@@ -698,11 +746,17 @@ function updateBoss() {
     if (b.y >= b.maxY) b.dir = -1;
     if (b.y <= b.baseY) b.dir = 1;
     b.x += Math.max(-1, Math.min(1, ddx * 0.05));
-  } else { // ship: vai e volta na horizontal
+  } else if (b.kind === 'ship') {
     b.y = b.baseY;
     b.x += b.vx * (hard ? 1.5 : 1);
     if (b.x > W - b.w/2 - 4) b.vx = -Math.abs(b.vx);
     if (b.x < b.w/2 + 4)     b.vx =  Math.abs(b.vx);
+  } else { // train: vai e volta SOBRE O TRILHO (y travado no rail)
+    b.y = b.baseY;
+    b.x += b.vx * (hard ? 1.55 : 1.0);
+    if (b.x > W - b.w/2 - 6) b.vx = -Math.abs(b.vx);
+    if (b.x < b.w/2 + 6)     b.vx =  Math.abs(b.vx);
+    b.smokeT = (b.smokeT || 0) + 1;
   }
   b.x = Math.max(b.w/2 + 4, Math.min(W - b.w/2 - 4, b.x));
   bossShoot(b, hard);
@@ -741,9 +795,10 @@ function killBoss() {
   // mas os recém-soltos do chefe ficam: deixamos cair pelos próximos frames
   enemies = []; eBullets = []; bullets = [];
   // inicia a sequência de fim de fase (scroll calmo -> heliporto -> pouso)
-  // espera UMA tela inteira de rolagem (~H/1.2) antes do heliporto aparecer
-  // — tempo pro jogador caçar os power-ups dropados pelo chefe
-  outro = { phase: 'scroll', t: Math.ceil(H / 1.2) };
+  // tempo livre antes do heliporto aparecer (caçar power-ups do chefe).
+  // O total — esta fase de scroll + a fase de approach (heliporto descendo
+  // até H*0.50) — fica em torno de UMA tela de rolagem.
+  outro = { phase: 'scroll', t: 240 };
   setBanner('FASE ' + stage + ' COMPLETA', 'POUSO À FRENTE');
   SFX.life();
   updateHud();
@@ -835,7 +890,7 @@ function updateOutro() {
     // pairar acima do pad, mas nunca sair do topo da tela
     const hover = Math.max(H * 0.30, cy - 22);
     p.y += (hover - p.y) * 0.05;
-    if (cy >= H * 0.58) {
+    if (cy >= H * 0.50) {
       o.phase = 'land';
       o.t = 70;
       o.land0 = TAKEOFF;                   // reaproveita a duração
@@ -893,6 +948,24 @@ function updateBonus() {
 }
 
 // --- jogador escolhe continuar: decola do heliporto, vai pra próxima fase ---
+// pula a animação de contagem: soma TUDO o que ainda falta de uma vez
+function skipBonusTally() {
+  const bn = bonus; if (!bn || bn.done) return;
+  // soma o que está sendo contado agora + as categorias futuras
+  const order = ['lives','bombs','cannon'];
+  let extra = bn.rem;
+  const idx = order.indexOf(bn.step);
+  for (let i = idx + 1; i < order.length; i++) {
+    if (order[i] === 'lives')  extra += bn.livesPts;
+    if (order[i] === 'bombs')  extra += bn.bombsPts;
+    if (order[i] === 'cannon') extra += bn.cannonPts;
+  }
+  score += extra;
+  if (score > hi) { hi = score; localStorage.tigerHeliHi = hi; }
+  updateHud();
+  bn.rem = 0; bn.step = 'done'; bn.done = true; bn.delay = 0;
+  SFX.life();
+}
 function continueAfterBonus() {
   if (!bonus || !bonus.done) return;
   stage++;
@@ -1052,8 +1125,14 @@ function update() {
     }
   }
   if (bossPending && (!banner || banner.t <= 0) && !boss) {
-    bossPending = false;
-    spawnBoss();
+    // se o chefe da fase é o TREM e ainda não há trilho na faixa correta,
+    // mantém pendente — o mapa segue rolando e o trilho vai aparecer.
+    if (nextBossKind() === 'train' && !findTrainRail()) {
+      if (!boss && !banner) setBanner('TREM SE APROXIMA', 'AGUARDANDO TRILHO');
+    } else {
+      bossPending = false;
+      spawnBoss();
+    }
   }
   if (boss) updateBoss();
 
@@ -1346,6 +1425,14 @@ function railWorldShift(worldY) {
   return worldY;
 }
 function railScreenY(n) { return railWorldShift(n*RAIL_P) + scrollY; }
+// trilho ideal p/ o boss-trem: visível na metade de cima e fora do mar
+function findTrainRail() {
+  return lineList(RAIL_P).find(o => {
+    const ry = railScreenY(o.n);
+    return ry > -20 && ry < H * 0.50 &&
+           biomeOf(segOf(ry)) !== 'ocean';
+  }) || null;
+}
 
 // pontes desenhadas de novo por cima dos barcos (barco passa por baixo)
 let gRoads = [], gRails = [];
@@ -3003,6 +3090,20 @@ function drawOceanSwell() {
   ctx.save();
   const sc = scrollY;                                  // rola com o mundo
 
+  // recorta APENAS as faixas onde o bioma é oceano (evita o swell/speckle
+  // pintar por cima do bioma vizinho durante a transição)
+  const oceanBands = [];
+  for (let s = segOf(H + 40); s <= segOf(-40); s++) {
+    if (biomeOf(s) !== 'ocean') continue;
+    const ya = Math.max(-40, scrollY - (s + 1) * SEG);
+    const yb = Math.min(H + 40, scrollY - s * SEG);
+    if (yb > ya) oceanBands.push([ya, yb]);
+  }
+  if (!oceanBands.length) { ctx.restore(); return; }
+  ctx.beginPath();
+  for (const [ya, yb] of oceanBands) ctx.rect(0, ya, W, yb - ya);
+  ctx.clip();
+
   // 0) variação tonal ORGÂNICA em blobs grandes e suaves (substitui a
   // antiga cor por célula -> acaba a grade de quadrados no oceano)
   for (let i = 0; i < 9; i++) {
@@ -3183,23 +3284,28 @@ function drawCityCars() {
     ctx.beginPath(); ctx.rect(0, ya, W, yb - ya); ctx.clip();
 
     const kx1 = Math.ceil(W / BLK);
-    // avenidas verticais: só ~18% delas têm tráfego, uma faixa só
+    // avenidas verticais: ~45% têm tráfego nas DUAS faixas (mão direita)
     for (let kx = 0; kx <= kx1; kx++) {
-      if (bhash(kx + 1, 11.3) > 0.30) continue;   // ~30% das avenidas
+      if (bhash(kx + 1, 11.3) > 0.45) continue;
       const ax = kx * BLK;
-      const dirY = bhash(kx + 7, 5.1) < 0.5 ? -1 : 1;
-      const sp = dirY < 0 ? 2.3 : 1.5;
-      const off = -dirY * frame * sp;
-      // mão direita: subindo usa a faixa da direita, descendo usa a esquerda
-      const dx = dirY < 0 ? 7 : -7;
-      const n0 = Math.floor((ya - scrollY - off) / P) - 1;
-      const n1 = Math.ceil((yb - scrollY - off) / P) + 1;
-      for (let n = n0; n <= n1; n++) {
-        const sy = n * P + off + scrollY;
-        if (sy < ya - 14 || sy > yb + 14) continue;
-        const id = ((kx * 7 + n * 13) % CAR_COLS.length
-                    + CAR_COLS.length) % CAR_COLS.length;
-        drawCar(ax + dx, sy, dirY > 0 ? Math.PI : 0, CAR_COLS[id]);
+      // mão direita: subindo (dirY=-1) na faixa da direita (+7);
+      //              descendo (dirY=+1) na faixa da esquerda (-7)
+      const lanes = [
+        { dx:  7, dirY: -1, sp: 2.3 },
+        { dx: -7, dirY:  1, sp: 1.5 },
+      ];
+      for (const ln of lanes) {
+        const off = -ln.dirY * frame * ln.sp;
+        const n0 = Math.floor((ya - scrollY - off) / P) - 1;
+        const n1 = Math.ceil((yb - scrollY - off) / P) + 1;
+        for (let n = n0; n <= n1; n++) {
+          const sy = n * P + off + scrollY;
+          if (sy < ya - 14 || sy > yb + 14) continue;
+          const id = ((kx * 7 + n * 13 + (ln.dx > 0 ? 1 : 0))
+                      % CAR_COLS.length + CAR_COLS.length) % CAR_COLS.length;
+          drawCar(ax + ln.dx, sy,
+                  ln.dirY > 0 ? Math.PI : 0, CAR_COLS[id]);
+        }
       }
     }
     // ruas horizontais: só ~18% delas têm tráfego, uma faixa só
@@ -3767,42 +3873,57 @@ function drawPadAt(cx, cy, marine, rotorK) {
   ctx.save();
   ctx.translate(cx, cy);
   if (marine) {
-    // base de mar: pilastras + deck quadrado de aço
-    // pilastras (4 cantos) com sombra na água
+    // base de mar: pilastras + deck retangular maior de aço
+    const DW = 78, DH = 64;                 // metades: deck 156x128
+    // pilastras (4 cantos) — empurradas pra dentro do deck
+    const PILL = [[-DW+14, DH-10], [DW-14, DH-10],
+                  [-DW+14, -DH+18], [DW-14, -DH+18]];
     ctx.fillStyle = 'rgba(0,0,0,.35)';
-    [[-38,28],[38,28],[-38,-22],[38,-22]].forEach(([px,py])=>{
+    PILL.forEach(([px,py])=>{
       ctx.beginPath();
-      ctx.ellipse(px+5, py+8, 9, 4.5, 0, 0, 7); ctx.fill();
+      ctx.ellipse(px+5, py+8, 10, 5, 0, 0, 7); ctx.fill();
     });
-    ctx.fillStyle = '#5a6068';
-    [[-38,28],[38,28],[-38,-22],[38,-22]].forEach(([px,py])=>{
-      ctx.fillRect(px-5, py-22, 10, 24);
-      ctx.fillStyle = '#7d8389';
-      ctx.fillRect(px-5, py-22, 10, 3);
+    PILL.forEach(([px,py])=>{
       ctx.fillStyle = '#5a6068';
+      ctx.fillRect(px-6, py-26, 12, 28);
+      ctx.fillStyle = '#7d8389';
+      ctx.fillRect(px-6, py-26, 12, 3);
     });
     // sombra do deck na água
     ctx.fillStyle = 'rgba(0,0,0,.30)';
-    ctx.fillRect(-50+6, -38+8, 100, 80);
-    // deck quadrado (aço com vigas)
+    ctx.fillRect(-DW+7, -DH+9, DW*2, DH*2);
+    // deck (aço com vigas)
     ctx.fillStyle = '#7a7e85';
-    ctx.fillRect(-50, -38, 100, 80);
-    ctx.strokeStyle = '#3b3e44'; ctx.lineWidth = 2;
-    ctx.strokeRect(-50, -38, 100, 80);
+    ctx.fillRect(-DW, -DH, DW*2, DH*2);
+    // chapas (placas de aço quadriculadas)
+    ctx.fillStyle = 'rgba(255,255,255,.04)';
+    for (let yy = -DH; yy < DH; yy += 16) {
+      for (let xx = -DW + ((yy & 16) ? 8 : 0); xx < DW; xx += 16)
+        ctx.fillRect(xx, yy, 14, 14);
+    }
+    // moldura externa
+    ctx.strokeStyle = '#3b3e44'; ctx.lineWidth = 2.5;
+    ctx.strokeRect(-DW, -DH, DW*2, DH*2);
     // vigas internas (cruz)
     ctx.strokeStyle = 'rgba(40,42,48,.65)'; ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.moveTo(-50,0); ctx.lineTo(50,0);
-    ctx.moveTo(0,-38); ctx.lineTo(0,42); ctx.stroke();
-    // amarelo de borda (faixa de alerta)
+    ctx.moveTo(-DW, 0); ctx.lineTo(DW, 0);
+    ctx.moveTo(0, -DH); ctx.lineTo(0, DH); ctx.stroke();
+    // faixas amarelas de alerta (topo e base)
     ctx.fillStyle = '#e6c533';
-    ctx.fillRect(-50, -38, 100, 4);
-    ctx.fillRect(-50, 34, 100, 4);
+    ctx.fillRect(-DW, -DH, DW*2, 5);
+    ctx.fillRect(-DW, DH - 5, DW*2, 5);
+    // listras pretas diagonais nas faixas (zona de pouso)
+    ctx.fillStyle = '#222';
+    for (let xx = -DW; xx < DW; xx += 14) {
+      ctx.fillRect(xx, -DH, 6, 5);
+      ctx.fillRect(xx + 7, DH - 5, 6, 5);
+    }
     // círculo do heliponto sobre o deck
     ctx.fillStyle = '#3b3e44';
-    ctx.beginPath(); ctx.arc(0, 0, 32, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, 36, 0, 7); ctx.fill();
     ctx.strokeStyle = '#e9eef2'; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.arc(0, 0, 28, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, 0, 32, 0, 7); ctx.stroke();
   } else {
     // plataforma de concreto (igual ao heliporto original)
     ctx.fillStyle = 'rgba(0,0,0,.28)';
@@ -3821,14 +3942,26 @@ function drawPadAt(cx, cy, marine, rotorK) {
   ctx.moveTo(13, -18);  ctx.lineTo(13, 18);
   ctx.moveTo(-13, 0);   ctx.lineTo(13, 0);
   ctx.stroke();
-  // luzes de borda piscando
-  const R = marine ? 46 : 44;
-  for (let a = 0; a < 7; a += Math.PI / 4) {
-    const on = (Math.floor(frame / 14) % 2) === 0;
-    ctx.fillStyle = on ? '#ffd24a' : '#7a6320';
-    ctx.beginPath();
-    ctx.arc(Math.cos(a) * R, Math.sin(a) * R, 3.2, 0, 7);
-    ctx.fill();
+  // luzes de borda piscando — no marítimo seguem o retângulo do deck
+  // (NUNCA caem fora dele, na água), no terrestre formam um círculo
+  const on = (Math.floor(frame / 14) % 2) === 0;
+  ctx.fillStyle = on ? '#ffd24a' : '#7a6320';
+  if (marine) {
+    const LX = 70, LY = 56;      // dentro da faixa amarela (DW=78, DH=64)
+    const pts = [
+      [-LX, -LY], [ 0, -LY], [ LX, -LY],
+      [ LX,   0], [ LX,  LY], [ 0,  LY],
+      [-LX,  LY], [-LX,   0],
+    ];
+    for (const [px, py] of pts) {
+      ctx.beginPath(); ctx.arc(px, py, 3.2, 0, 7); ctx.fill();
+    }
+  } else {
+    const R = 44;
+    for (let a = 0; a < 7; a += Math.PI / 4) {
+      ctx.beginPath(); ctx.arc(Math.cos(a) * R, Math.sin(a) * R, 3.2, 0, 7);
+      ctx.fill();
+    }
   }
   // poeira do rotor (decolagem/pouso)
   if (rotorK > 0) {
@@ -4558,6 +4691,170 @@ function drawBossTank(b, W2, H2, hurt, gl) {
     ctx.restore();
   }
 }
+function drawBossTrain(b, W2, H2, hurt, gl) {
+  // sombra do casco
+  ctx.fillStyle = 'rgba(0,0,0,.45)';
+  ctx.fillRect(-W2 + 4, -H2 + 6, b.w, b.h);
+
+  // chassi blindado (gradiente vertical: top claro, meio mid, base escuro)
+  const grd = ctx.createLinearGradient(0, -H2, 0, H2);
+  grd.addColorStop(0,   '#1c2128');
+  grd.addColorStop(0.45,'#3b4250');
+  grd.addColorStop(0.55,'#3b4250');
+  grd.addColorStop(1,   '#10141a');
+  ctx.fillStyle = grd;
+  ctx.fillRect(-W2, -H2, b.w, b.h);
+  // moldura externa
+  ctx.strokeStyle = '#070a0e'; ctx.lineWidth = 2.5;
+  ctx.strokeRect(-W2, -H2, b.w, b.h);
+
+  // chapas de blindagem (placas com sutil divisão vertical)
+  ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 1;
+  for (let xx = -W2 + 28; xx < W2 - 28; xx += 28) {
+    ctx.beginPath(); ctx.moveTo(xx, -H2+10); ctx.lineTo(xx, H2-10); ctx.stroke();
+  }
+  // rivets nas bordas
+  ctx.fillStyle = '#0b0e13';
+  for (let xx = -W2 + 8; xx <= W2 - 8; xx += 12) {
+    ctx.beginPath(); ctx.arc(xx, -H2 + 14, 1.8, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(xx,  H2 - 14, 1.8, 0, 7); ctx.fill();
+  }
+
+  // faixas de alerta vermelho com listras pretas (topo e base do casco)
+  ctx.fillStyle = '#a01818';
+  ctx.fillRect(-W2, -H2 + 4, b.w, 5);
+  ctx.fillRect(-W2,  H2 - 9, b.w, 5);
+  ctx.fillStyle = '#000';
+  for (let xx = -W2; xx < W2; xx += 14) {
+    ctx.fillRect(xx,       -H2 + 4, 6, 5);
+    ctx.fillRect(xx + 7,    H2 - 9, 6, 5);
+  }
+
+  // ROSTO MAU: caveiras pintadas nas duas extremidades laterais
+  [ -W2 + 20, W2 - 20 ].forEach(cx => {
+    ctx.fillStyle = '#d33';
+    ctx.beginPath(); ctx.arc(cx, 0, 9, 0, 7); ctx.fill();
+    // crânio: dois olhos pretos + dentes
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.arc(cx - 2.6, -1.5, 1.8, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + 2.6, -1.5, 1.8, 0, 7); ctx.fill();
+    ctx.fillRect(cx - 3.5, 1.8, 7, 2);
+    ctx.fillStyle = '#d33';
+    [-2, 0, 2].forEach(dx => ctx.fillRect(cx + dx - 0.5, 1.8, 1, 2));
+  });
+
+  // pods de míssil (laterais ao centro): tubos visíveis vista de cima
+  const podHalfW = 22, podHalfH = 12;
+  [ -b.w * 0.30, b.w * 0.30 ].forEach(pcx => {
+    ctx.fillStyle = '#11151c';
+    ctx.fillRect(pcx - podHalfW, -podHalfH, podHalfW*2, podHalfH*2);
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 1;
+    ctx.strokeRect(pcx - podHalfW, -podHalfH, podHalfW*2, podHalfH*2);
+    // 4 tubos com ponta vermelha
+    for (let i = 0; i < 4; i++) {
+      const ty = -podHalfH + 3 + i * ((podHalfH*2 - 6) / 4);
+      ctx.fillStyle = '#2b323d';
+      ctx.fillRect(pcx - podHalfW + 3, ty, podHalfW*2 - 6, 3);
+      ctx.fillStyle = '#e22';
+      ctx.fillRect(pcx + podHalfW - 6, ty, 3, 3);
+    }
+  });
+
+  // chaminé central com fumaça subindo (ancorada ao boss, não ao mundo)
+  ctx.fillStyle = '#0b0e13';
+  ctx.fillRect(-7, -H2 + 12, 14, 14);
+  ctx.fillStyle = '#2c3340';
+  ctx.fillRect(-6, -H2 + 12, 12, 4);
+  // 4 puffs animados pela chaminé
+  ctx.save();
+  for (let i = 0; i < 4; i++) {
+    const ph = ((b.smokeT || 0) * 0.6 + i * 22) % 90;
+    const sy = -H2 + 12 - ph * 1.1;
+    const r  = 4 + ph * 0.12;
+    const a  = Math.max(0, 0.55 - ph * 0.006);
+    ctx.fillStyle = `rgba(50,55,65,${a})`;
+    ctx.beginPath();
+    ctx.arc((i - 1.5) * 3 + Math.sin(ph * 0.2) * 4, sy, r, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+
+  // TORRETA central do canhão (mira no heli)
+  const aimAng = Math.atan2(player.y - b.y, player.x - b.x);
+  ctx.save();
+  ctx.rotate(aimAng + Math.PI / 2);    // 0 = canhão p/ baixo da torreta
+  // base circular
+  ctx.fillStyle = '#1a1e25';
+  ctx.beginPath(); ctx.arc(0, 0, 20, 0, 7); ctx.fill();
+  ctx.fillStyle = '#3b4250';
+  ctx.beginPath(); ctx.arc(0, 0, 16, 0, 7); ctx.fill();
+  // anel rebitado
+  ctx.fillStyle = '#0c0f15';
+  for (let a = 0; a < 7; a += Math.PI / 6) {
+    ctx.beginPath();
+    ctx.arc(Math.cos(a) * 18, Math.sin(a) * 18, 1.4, 0, 7); ctx.fill();
+  }
+  // cano longo (sai para "baixo" da torreta, que é o lado do alvo)
+  ctx.fillStyle = '#0a0d12';
+  ctx.fillRect(-4, -38, 8, 24);
+  ctx.fillStyle = '#3b4250';
+  ctx.fillRect(-2, -38, 4, 24);
+  // freio de boca
+  ctx.fillStyle = '#0a0d12';
+  ctx.fillRect(-5, -40, 10, 4);
+  // fogacho quando atira (cd baixinho)
+  if (b.cd < 6) {
+    ctx.globalCompositeOperation = 'lighter';
+    const fg = ctx.createRadialGradient(0, -42, 0, 0, -42, 14);
+    fg.addColorStop(0, 'rgba(255,200,70,.9)');
+    fg.addColorStop(1, 'rgba(255,80,30,0)');
+    ctx.fillStyle = fg;
+    ctx.beginPath(); ctx.arc(0, -42, 14, 0, 7); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  ctx.restore();
+
+  // rodas (truques) — vistas de cima nas duas laterais
+  ctx.fillStyle = '#0a0d12';
+  for (let i = 0; i < 7; i++) {
+    const xx = -W2 + 18 + i * ((b.w - 36) / 6);
+    ctx.fillRect(xx - 4, -H2 - 4, 8, 7);
+    ctx.fillRect(xx - 4,  H2 - 3, 8, 7);
+  }
+
+  // faróis nas duas extremidades
+  ctx.fillStyle = '#fff5b8';
+  ctx.fillRect(-W2 - 1, -4, 5, 8);
+  ctx.fillRect( W2 - 4, -4, 5, 8);
+  ctx.globalCompositeOperation = 'lighter';
+  [ -W2 - 4, W2 + 4 ].forEach(hx => {
+    ctx.fillStyle = `rgba(255,240,150,${.35 + gl * .35})`;
+    ctx.beginPath(); ctx.arc(hx, 0, 11, 0, 7); ctx.fill();
+  });
+  ctx.globalCompositeOperation = 'source-over';
+
+  // dano: fumaça preta + chamas saindo das chapas quando hp baixo
+  if (hurt) {
+    ctx.fillStyle = `rgba(60,60,60,${.30 + gl * .25})`;
+    [-b.w*0.30, 0, b.w*0.30].forEach((ox, i) => {
+      const ph = Math.sin(frame * 0.12 + i) * 3;
+      ctx.beginPath(); ctx.arc(ox, -H2 - 10 + ph, 11, 0, 7); ctx.fill();
+    });
+    ctx.fillStyle = `rgba(255,${100+gl*100|0},30,${.45+gl*.3})`;
+    ctx.fillRect(-W2*0.30 - 5, -H2 - 4, 10, 5);
+    ctx.fillRect( W2*0.30 - 5, -H2 - 4, 10, 5);
+    // aura vermelha pulsando
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const r = Math.max(W2, H2) * 1.1;
+    const fg = ctx.createRadialGradient(0, 0, r * 0.35, 0, 0, r);
+    fg.addColorStop(0, `rgba(255,70,45,${.18 + gl * .2})`);
+    fg.addColorStop(1, 'rgba(255,40,30,0)');
+    ctx.fillStyle = fg;
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.fill();
+    ctx.restore();
+  }
+}
+
 function drawBossShip(b, W2, H2, hurt, gl) {
   const sc = b.w/120;
   // esteira de espuma na popa (FX vivo)
@@ -4613,8 +4910,9 @@ function drawBoss() {
   ctx.save();
   ctx.translate(b.x, b.y);
 
-  if (b.kind === 'tank') { drawBossTank(b, W2, H2, hurt, gl); ctx.restore(); return; }
-  if (b.kind === 'ship') { drawBossShip(b, W2, H2, hurt, gl); ctx.restore(); return; }
+  if (b.kind === 'tank')  { drawBossTank(b, W2, H2, hurt, gl);  ctx.restore(); return; }
+  if (b.kind === 'ship')  { drawBossShip(b, W2, H2, hurt, gl);  ctx.restore(); return; }
+  if (b.kind === 'train') { drawBossTrain(b, W2, H2, hurt, gl); ctx.restore(); return; }
 
   // sombra projetada no chão (deslocada — está voando)
   ctx.fillStyle = 'rgba(0,0,0,.28)';

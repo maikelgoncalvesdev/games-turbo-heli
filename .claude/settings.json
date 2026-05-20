@@ -21,7 +21,11 @@
       "Bash(git push *)",
       "Bash(sed -n '8,75p' index.html)",
       "Bash(sed -n '104,3966p' index.html)",
-      "Bash(node -c game.js)"
+      "Bash(node -c game.js)",
+      "Bash(git commit -m '@ *)",
+      "Bash(git commit *)",
+      "PowerShell(git push origin main 2>&1)",
+      "Bash(git fetch *)"
     ]
   }
 }
